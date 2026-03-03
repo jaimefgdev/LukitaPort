@@ -1,0 +1,50 @@
+version: "3.9"
+
+# ── LukitaPort v2.0 — docker-compose ────────────────────────────────────────
+# Usage:
+#   docker compose up --build          # first run (builds image)
+#   docker compose up                  # subsequent runs
+#   docker compose up -d               # detached mode
+#   docker compose down                # stop & remove containers
+#
+# Open http://localhost:8000 after the server starts.
+
+services:
+  lukitaport:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lukitaport
+
+    ports:
+      - "8000:8000"
+
+    # nmap requires NET_ADMIN or CAP_NET_RAW for SYN scans.
+    # The app uses connect-scan (-sT) which doesn't need root,
+    # but these caps future-proof for -sS if you add it later.
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+
+    # Playwright/Chromium needs /dev/shm large enough for Chrome's sandbox
+    shm_size: "256m"
+
+    # Environment overrides (optional)
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+
+    # Restart policy — always restart unless manually stopped
+    restart: unless-stopped
+
+    # Health check — hit the root endpoint every 30 s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    # Volumes — uncomment to persist nothing (stateless) or mount code for dev
+    # volumes:
+    #   - .:/app                # live-reload dev mount (requires --reload in CMD)

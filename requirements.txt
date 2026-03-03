@@ -1,0 +1,9 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pydantic==2.7.1
+httpx==0.27.0
+reportlab==4.1.0
+playwright==1.44.0
+# python-nmap is no longer required — nmap is called via asyncio.create_subprocess_exec.
+# Nmap binary must be installed on the system separately.
+# After installing requirements, run: playwright install chromium --with-deps

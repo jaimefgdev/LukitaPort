@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>LukitaPort — Port Scanner</title>
+    <link rel="stylesheet" href="/static/styles.css"/>
+</head>
+<body class="es">
+
+<!-- POPUP LEGAL -->
+<div id="legal-overlay">
+    <div class="legal-popup">
+        <div class="legal-popup-title">
+            <span class="es">⚠ AVISO LEGAL</span>
+            <span class="en">⚠ LEGAL NOTICE</span>
+        </div>
+        <p class="es">Esta herramienta está diseñada <strong>exclusivamente para uso educativo</strong> y para el análisis de redes y sistemas sobre los que tienes <strong>autorización expresa</strong>.</p>
+        <p class="en">This tool is designed <strong>exclusively for educational use</strong> and for the analysis of networks and systems you have <strong>explicit authorization</strong> to scan.</p>
+        <p class="es">El escaneo de sistemas ajenos sin permiso puede constituir un <strong>delito penal</strong> en tu jurisdicción.</p>
+        <p class="en">Scanning systems without permission may constitute a <strong>criminal offense</strong> in your jurisdiction.</p>
+        <div class="legal-popup-actions">
+            <button class="btn-accept" id="btn-accept"><span class="es">Entendido</span><span class="en">Understood</span></button>
+        </div>
+    </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+
+<!-- HEADER -->
+<header>
+    <div class="logo">Lukita<span>Port</span></div>
+    <div class="header-right">
+        <button class="lang-switch" id="lang-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            <span id="lang-label">ES</span>
+        </button>
+    </div>
+</header>
+
+<main>
+
+    <!-- ── Configuración del escaneo (COMPACT) ── -->
+    <div class="panel">
+        <div class="panel-header">
+            <span class="dot"></span>
+            <span class="es">Escaneo de Puertos</span>
+            <span class="en">Port Scan</span>
+        </div>
+        <div class="panel-body" style="padding:16px 20px">
+
+            <!-- Target full width -->
+            <div class="scan-target-row">
+                <label><span class="es">Objetivo — IP o Dominio</span><span class="en">Target — IP or Domain</span></label>
+                <input type="text" id="target" placeholder="192.168.1.1 · 10.0.0.1 · example.com" autocomplete="off" spellcheck="false" style="margin-top:7px"/>
+            </div>
+
+            <!-- Options row -->
+            <div class="scan-form-compact">
+                <div class="form-group">
+                    <label><span class="es">Modo</span><span class="en">Mode</span></label>
+                    <select id="scan-mode">
+                        <option value="quick"  data-es="Rápido — 30 puertos"  data-en="Quick — 30 ports">Rápido — 30 puertos</option>
+                        <option value="custom" data-es="Personalizado" data-en="Custom range">Personalizado</option>
+                        <option value="full"   data-es="Completo — 1-65535"     data-en="Full — 1-65535">Completo — 1-65535</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label><span class="es">Perfil</span><span class="en">Profile</span></label>
+                    <select id="scan-profile">
+                        <option value="normal"     data-es="Normal"     data-en="Normal">Normal</option>
+                        <option value="stealth"    data-es="Stealth"    data-en="Stealth">Stealth</option>
+                        <option value="aggressive" data-es="Agresivo"   data-en="Aggressive">Agresivo</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label><span class="es">Timeout/puerto</span><span class="en">Timeout/port</span></label>
+                    <div class="slider-row">
+                        <input type="range" id="timeout" min="0.1" max="5" step="0.1" value="1.0"/>
+                        <span class="slider-val" id="timeout-val">1.0s</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Custom range (hidden unless custom mode) -->
+            <div class="custom-range" id="custom-range" style="margin-bottom:12px">
+                <div class="form-group">
+                    <label><span class="es">Puerto inicio</span><span class="en">Start port</span></label>
+                    <input type="number" id="port-start" value="1" min="1" max="65535"/>
+                </div>
+                <div class="form-group">
+                    <label><span class="es">Puerto fin</span><span class="en">End port</span></label>
+                    <input type="number" id="port-end" value="1024" min="1" max="65535"/>
+                </div>
+            </div>
+
+            <!-- Anon mode compact -->
+            <div class="anon-row">
+                <label class="anon-toggle" for="anon-mode" style="display:flex;align-items:center;gap:9px;cursor:pointer;flex:1">
+                    <div id="anon-dot" style="width:9px;height:9px;border-radius:50%;background:#333;box-shadow:none;transition:all .3s;flex-shrink:0"></div>
+                    <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.5px;color:#555">
+                        🕵️ <span class="es">MODO ANÓNIMO</span><span class="en">ANONYMOUS MODE</span>
+                    </span>
+                    <input type="checkbox" id="anon-mode" style="display:none"/>
+                    <span id="anon-status" style="font-family:var(--font-mono);font-size:10px;color:#333;margin-left:auto">
+                        <span class="es">Stealth + delays aleatorios</span>
+                        <span class="en">Stealth + random delays</span>
+                    </span>
+                </label>
+            </div>
+
+            <button class="btn-scan" id="btn-scan">
+                <span class="es">Iniciar Escaneo</span>
+                <span class="en">Start Scan</span>
+            </button>
+
+            <div class="status-bar" id="status-bar">
+                <div class="status-info">
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                        <span class="status-target" id="status-target">—</span>
+                        <span id="geo-badge"></span>
+                    </div>
+                    <div class="status-counts">
+                        <span><span class="es">Escaneados</span><span class="en">Scanned</span>: <strong id="st-scanned">0</strong></span>
+                        <span class="open"><span class="es">Abiertos</span><span class="en">Open</span>: <strong id="st-open">0</strong></span>
+                        <span>Total: <strong id="st-total">0</strong></span>
+                    </div>
+                </div>
+                <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Summary -->
+    <div class="panel" id="summary-panel" style="display:none;">
+        <div class="summary-grid">
+            <div class="summary-card"><div class="val val-open" id="sum-open">0</div><div class="lbl"><span class="es">Abiertos</span><span class="en">Open</span></div></div>
+            <div class="summary-card"><div class="val val-closed" id="sum-closed">0</div><div class="lbl"><span class="es">Cerrados</span><span class="en">Closed</span></div></div>
+            <div class="summary-card"><div class="val val-filtered" id="sum-filtered">0</div><div class="lbl"><span class="es">Filtrados</span><span class="en">Filtered</span></div></div>
+            <div class="summary-card"><div class="val val-total" id="sum-total">0</div><div class="lbl"><span class="es">Escaneados</span><span class="en">Scanned</span></div></div>
+        </div>
+    </div>
+
+    <!-- Resultados -->
+    <div class="panel" id="results-panel">
+        <div class="results-header-row">
+            <div class="results-title">
+                <span class="dot" id="results-dot"></span>
+                <span class="es">Resultados</span><span class="en">Results</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <button class="btn-fingerprint" id="btn-fingerprint" style="display:none;" disabled>
+                    🔍 <span class="es">Fingerprinting</span><span class="en">Fingerprint</span>
+                </button>
+                <div class="export-btns">
+                    <button class="btn-export" id="btn-json">↓ JSON</button>
+                    <button class="btn-export" id="btn-csv">↓ CSV</button>
+                    <button class="btn-export" id="btn-html">↓ HTML</button>
+                    <button class="btn-export" id="btn-pdf">↓ PDF</button>
+                    <button class="btn-export" id="btn-md">↓ MD</button>
+                </div>
+            </div>
+        </div>
+        <div id="fp-status-bar" class="fp-status"></div>
+        <div class="filter-tabs">
+            <button class="filter-tab active" data-filter="all"><span class="es">Todos</span><span class="en">All</span></button>
+            <button class="filter-tab" data-filter="open"><span class="es">Abiertos</span><span class="en">Open</span></button>
+            <button class="filter-tab" data-filter="closed"><span class="es">Cerrados</span><span class="en">Closed</span></button>
+            <button class="filter-tab" data-filter="filtered"><span class="es">Filtrados</span><span class="en">Filtered</span></button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr>
+                    <th><span class="es">Puerto</span><span class="en">Port</span></th>
+                    <th><span class="es">Estado</span><span class="en">State</span></th>
+                    <th><span class="es">Servicio</span><span class="en">Service</span></th>
+                    <th><span class="es">Riesgo</span><span class="en">Risk</span></th>
+                    <th><span class="es">Tiempo</span><span class="en">Time</span></th>
+                    <th><span class="es">Versión / Banner</span><span class="en">Version / Banner</span></th>
+                </tr></thead>
+                <tbody id="results-body">
+                    <tr><td colspan="6"><div class="empty-state">[ _ ]<br><span class="es">Configura un objetivo y lanza el escaneo</span><span class="en">Set a target and start the scan</span></div></td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Auditoría avanzada -->
+    <div class="audit-panel" id="audit-panel">
+        <div class="panel-header">
+            <span class="dot" style="background:#aa44ff;box-shadow:0 0 6px rgba(170,68,255,.4)"></span>
+            <span class="es">Auditoría Avanzada</span><span class="en">Advanced Audit</span>
+            <span id="audit-status" style="margin-left:auto;font-family:var(--font-mono);font-size:10px;color:var(--text-dim);display:flex;align-items:center;gap:6px"></span>
+        </div>
+        <div class="audit-tabs">
+            <button class="audit-tab active" data-pane="headers">🔒 <span class="es">Cabeceras HTTP</span><span class="en">HTTP Headers</span></button>
+            <button class="audit-tab" data-pane="technologies">🔬 <span class="es">Tecnologías</span><span class="en">Technologies</span></button>
+            <button class="audit-tab" data-pane="paths">🗂 <span class="es">Rutas Sensibles</span><span class="en">Sensitive Paths</span></button>
+            <button class="audit-tab" data-pane="ssl">🔐 SSL/TLS</button>
+            <button class="audit-tab" data-pane="cve">🐛 CVE</button>
+            <button class="audit-tab" data-pane="screenshot" style="display:none;">📷 Screenshot</button>
+        </div>
+        <div class="audit-pane active" id="pane-headers">
+            <div class="no-results">[ _ ]</div>
+        </div>
+        <div class="audit-pane" id="pane-technologies">
+            <div class="no-results">[ _ ]</div>
+        </div>
+        <div class="audit-pane" id="pane-paths">
+            <div class="no-results">[ _ ]</div>
+        </div>
+        <div class="audit-pane" id="pane-ssl">
+            <div class="no-results">[ _ ]</div>
+        </div>
+        <div class="audit-pane" id="pane-cve">
+            <div class="no-results" style="padding:40px 24px">
+                [ 🐛 ]<br>
+                <span class="es">Ejecuta <strong style="color:#aaa">Fingerprinting</strong> primero para mejores resultados, luego lanza el análisis CVE.</span>
+                <span class="en">Run <strong style="color:#aaa">Fingerprinting</strong> first for better results, then launch CVE analysis.</span>
+                <br><br>
+                <button id="btn-launch-cve" onclick="window.launchCVELookup && window.launchCVELookup()" style="padding:8px 22px;background:transparent;border:1px solid #333;border-radius:4px;color:#888;font-family:var(--font-mono);font-size:11px;cursor:pointer;letter-spacing:.8px;transition:all .2s" onmouseover="this.style.borderColor='#ff0033';this.style.color='#ff0033'" onmouseout="this.style.borderColor='#333';this.style.color='#888'">
+                    🐛 <span class="es">Buscar CVEs ahora</span><span class="en">Search CVEs now</span>
+                </button>
+            </div>
+        </div>
+        <div class="audit-pane" id="pane-screenshot">
+            <div class="no-results">[ _ ]<br><span class="es">Capturando screenshot...</span><span class="en">Capturing screenshot...</span></div>
+        </div>
+    </div>
+
+    <!-- Historial reciente -->
+    <div class="panel" id="history-panel" style="display:none;">
+        <div class="panel-header">
+            <span class="dot" style="background:#ffaa00;box-shadow:0 0 6px rgba(255,170,0,.4)"></span>
+            <span class="es">Historial reciente</span>
+            <span class="en">Recent history</span>
+        </div>
+        <div id="history-list"></div>
+    </div>
+
+    <!-- ── OSINT & Descubrimiento (AL FONDO) ── -->
+    <div class="panel" style="margin-top:8px">
+        <div class="panel-header">
+            <span class="dot" style="background:#8866ff;box-shadow:0 0 6px rgba(136,102,255,.4)"></span>
+            <span class="es">OSINT &amp; Descubrimiento de Red</span>
+            <span class="en">OSINT &amp; Network Discovery</span>
+        </div>
+        <div class="panel-body">
+            <div class="osint-grid">
+
+                <!-- Ping Sweep -->
+                <div class="osint-panel-inner">
+                    <div class="osint-panel-header">
+                        <span class="dot" style="background:#00ff88"></span>
+                        <span>Ping Sweep (CIDR)</span>
+                    </div>
+                    <div class="osint-panel-body">
+                        <div class="osint-help">
+                            <span class="es">Introduce un rango de red en formato CIDR (ej: <strong>192.168.1.0/24</strong>) y detecta qué hosts están activos con su tiempo de respuesta. Haz clic en cualquier IP para escanearlo.</span>
+                            <span class="en">Enter a network range in CIDR format (e.g. <strong>192.168.1.0/24</strong>) to detect live hosts and their response times. Click any IP to scan it.</span>
+                        </div>
+                        <div class="form-group">
+                            <label><span class="es">Rango CIDR</span><span class="en">CIDR Range</span></label>
+                            <input type="text" id="discover-cidr" placeholder="192.168.1.0/24" autocomplete="off" spellcheck="false"/>
+                        </div>
+                        <button class="btn-scan" id="btn-discover" style="padding:10px">
+                            <span class="es">Descubrir Hosts</span>
+                            <span class="en">Discover Hosts</span>
+                        </button>
+                        <div id="discover-output" class="osint-output"></div>
+                    </div>
+                </div>
+
+                <!-- Subdomain Enumeration -->
+                <div class="osint-panel-inner">
+                    <div class="osint-panel-header">
+                        <span class="dot" style="background:#8899ff"></span>
+                        <span class="es">Enumeración de Subdominios</span>
+                        <span class="en">Subdomain Enumeration</span>
+                    </div>
+                    <div class="osint-panel-body">
+                        <div class="osint-help">
+                            <span class="es">Introduce un dominio (ej: <strong>google.com</strong>) y busca subdominios en registros públicos de certificados SSL (crt.sh). Muestra IP resuelta y validez del cert. Haz clic en → para escanearlo.</span>
+                            <span class="en">Enter a domain (e.g. <strong>google.com</strong>) and find subdomains from public SSL certificate logs (crt.sh). Shows resolved IP and cert validity. Click → to scan it directly.</span>
+                        </div>
+                        <div class="form-group">
+                            <label><span class="es">Dominio objetivo</span><span class="en">Target domain</span></label>
+                            <input type="text" id="subdomain-input" placeholder="example.com" autocomplete="off" spellcheck="false"/>
+                        </div>
+                        <button class="btn-scan" id="btn-subdomains" style="padding:10px">
+                            <span class="es">Buscar Subdominios</span>
+                            <span class="en">Find Subdomains</span>
+                        </button>
+                        <div id="subdomain-output" class="osint-output"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</main>
+
+<footer>
+    <div>LukitaPort — <span class="es">Herramienta educativa de análisis de redes</span><span class="en">Educational network analysis tool</span></div>
+    <div>FastAPI + asyncio · <a href="https://github.com/jaimefg1888" target="_blank">jaimefg1888</a></div>
+</footer>
+
+<script type="module" src="/static/main.js"></script>
+</body>
+</html>

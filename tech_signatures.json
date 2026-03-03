@@ -1,0 +1,293 @@
+[
+  {
+    "name": "WordPress",
+    "icon": "📝",
+    "category": "CMS",
+    "body": ["wp-content/", "wp-includes/", "/wp-json/", "wordpress"],
+    "headers": {"X-Pingback": "xmlrpc\\.php"}
+  },
+  {
+    "name": "Joomla",
+    "icon": "📝",
+    "category": "CMS",
+    "body": ["/components/com_", "Joomla!", "/media/jui/"]
+  },
+  {
+    "name": "Drupal",
+    "icon": "📝",
+    "category": "CMS",
+    "body": ["Drupal\\.settings", "/sites/default/files/", "drupal\\.js"],
+    "headers": {"X-Generator": "Drupal"}
+  },
+  {
+    "name": "Shopify",
+    "icon": "🛍",
+    "category": "E-Commerce",
+    "body": ["cdn\\.shopify\\.com", "shopify\\.com/s/files"],
+    "headers": {"X-Shopify-Stage": "."}
+  },
+  {
+    "name": "WooCommerce",
+    "icon": "🛍",
+    "category": "E-Commerce",
+    "body": ["woocommerce", "wc-", "/wc-api/"]
+  },
+  {
+    "name": "Magento",
+    "icon": "🛍",
+    "category": "E-Commerce",
+    "body": ["Mage\\.", "mage/", "skin/frontend/"]
+  },
+  {
+    "name": "PrestaShop",
+    "icon": "🛍",
+    "category": "E-Commerce",
+    "body": ["prestashop", "/modules/blockcart/"],
+    "headers": {"X-Powered-By": "PrestaShop"}
+  },
+  {
+    "name": "React",
+    "icon": "⚛️",
+    "category": "JavaScript Framework",
+    "body": ["react\\.production\\.min\\.js", "__REACT_DEVTOOLS", "data-reactroot"]
+  },
+  {
+    "name": "Vue.js",
+    "icon": "💚",
+    "category": "JavaScript Framework",
+    "body": ["vue\\.min\\.js", "vue\\.js", "__vue__", "data-v-"]
+  },
+  {
+    "name": "Angular",
+    "icon": "🔴",
+    "category": "JavaScript Framework",
+    "body": ["angular\\.min\\.js", "ng-version=", "ng-app="]
+  },
+  {
+    "name": "Next.js",
+    "icon": "▲",
+    "category": "JavaScript Framework",
+    "body": ["__NEXT_DATA__", "/_next/static/"]
+  },
+  {
+    "name": "Nuxt.js",
+    "icon": "💚",
+    "category": "JavaScript Framework",
+    "body": ["__nuxt", "_nuxt/", "nuxt\\.js"]
+  },
+  {
+    "name": "Svelte",
+    "icon": "🧡",
+    "category": "JavaScript Framework",
+    "body": ["__svelte", "\\.svelte-"]
+  },
+  {
+    "name": "jQuery",
+    "icon": "🔵",
+    "category": "JavaScript Library",
+    "body": ["jquery\\.min\\.js", "jquery-[0-9]"]
+  },
+  {
+    "name": "Bootstrap",
+    "icon": "🅱",
+    "category": "CSS Framework",
+    "body": ["bootstrap\\.min\\.css", "bootstrap\\.min\\.js"]
+  },
+  {
+    "name": "Tailwind CSS",
+    "icon": "🌊",
+    "category": "CSS Framework",
+    "body": ["tailwind\\.css", "tailwindcss"]
+  },
+  {
+    "name": "Apache",
+    "icon": "🪶",
+    "category": "Web Server",
+    "headers": {"Server": "Apache"}
+  },
+  {
+    "name": "Nginx",
+    "icon": "🟩",
+    "category": "Web Server",
+    "headers": {"Server": "nginx"}
+  },
+  {
+    "name": "Caddy",
+    "icon": "⚡",
+    "category": "Web Server",
+    "headers": {"Server": "[Cc]addy"}
+  },
+  {
+    "name": "IIS",
+    "icon": "🪟",
+    "category": "Web Server",
+    "headers": {"Server": "IIS"}
+  },
+  {
+    "name": "Cloudflare",
+    "icon": "🌐",
+    "category": "CDN / WAF",
+    "headers": {"Server": "cloudflare", "CF-Ray": "."}
+  },
+  {
+    "name": "Fastly",
+    "icon": "⚡",
+    "category": "CDN",
+    "headers": {"X-Fastly-Request-ID": ".", "Via": "varnish"}
+  },
+  {
+    "name": "PHP",
+    "icon": "🐘",
+    "category": "Backend Language",
+    "headers": {"X-Powered-By": "PHP"},
+    "body": ["\\.php\\b"]
+  },
+  {
+    "name": "Python / Django",
+    "icon": "🐍",
+    "category": "Backend Framework",
+    "headers": {"Server": "WSGIServer|gunicorn|Django"},
+    "body": ["csrfmiddlewaretoken"]
+  },
+  {
+    "name": "FastAPI",
+    "icon": "🐍",
+    "category": "Backend Framework",
+    "body": ["openapi\\.json", "swagger-ui"],
+    "headers": {"Server": "uvicorn"}
+  },
+  {
+    "name": "Laravel",
+    "icon": "🔴",
+    "category": "Backend Framework",
+    "body": ["laravel_session", "Laravel"],
+    "headers": {"Set-Cookie": "laravel_session"}
+  },
+  {
+    "name": "Ruby on Rails",
+    "icon": "💎",
+    "category": "Backend Framework",
+    "headers": {"Server": "Passenger"},
+    "body": ["rails", "ActionController"]
+  },
+  {
+    "name": "ASP.NET",
+    "icon": "🪟",
+    "category": "Backend Framework",
+    "headers": {"X-Powered-By": "ASP\\.NET", "X-AspNet-Version": "."},
+    "body": ["__VIEWSTATE"]
+  },
+  {
+    "name": "Node.js / Express",
+    "icon": "🟩",
+    "category": "Backend Framework",
+    "headers": {"X-Powered-By": "Express"}
+  },
+  {
+    "name": "Google Analytics",
+    "icon": "📊",
+    "category": "Analytics",
+    "body": ["google-analytics\\.com/analytics\\.js", "gtag\\(", "UA-\\d+-\\d+", "G-[A-Z0-9]+"]
+  },
+  {
+    "name": "Google Tag Manager",
+    "icon": "🏷",
+    "category": "Analytics",
+    "body": ["googletagmanager\\.com/gtm\\.js", "GTM-[A-Z0-9]+"]
+  },
+  {
+    "name": "Hotjar",
+    "icon": "🔥",
+    "category": "Analytics",
+    "body": ["hotjar\\.com"]
+  },
+  {
+    "name": "Matomo",
+    "icon": "📊",
+    "category": "Analytics",
+    "body": ["matomo\\.js", "piwik\\.js"]
+  },
+  {
+    "name": "Zendesk",
+    "icon": "💬",
+    "category": "Chat",
+    "body": ["zopim\\.com", "zendesk\\.com"]
+  },
+  {
+    "name": "Tawk.to",
+    "icon": "💬",
+    "category": "Chat",
+    "body": ["tawk\\.to"]
+  },
+  {
+    "name": "HubSpot",
+    "icon": "🟠",
+    "category": "Marketing",
+    "body": ["hubspot\\.com", "hs-scripts\\.com"]
+  },
+  {
+    "name": "AWS WAF / CloudFront",
+    "icon": "🛡",
+    "category": "WAF",
+    "headers": {
+      "X-Amz-Cf-Id": ".",
+      "X-Amzn-Requestid": ".",
+      "X-Amz-Waf-Action": ".",
+      "X-Cache": "CloudFront"
+    },
+    "body": ["AmazonWAF", "Request blocked by AWS WAF"]
+  },
+  {
+    "name": "Akamai",
+    "icon": "🛡",
+    "category": "WAF",
+    "headers": {
+      "X-Akamai-Transformed": ".",
+      "X-Akamai-Session-Id": ".",
+      "X-Check-Cacheable": ".",
+      "X-True-Cache-Key": ".",
+      "Akamai-Cache-Status": "."
+    },
+    "body": ["akamai\\.net", "Reference\\s#\\d+\\.\\d+\\.\\d+"]
+  },
+  {
+    "name": "Imperva / Incapsula",
+    "icon": "🛡",
+    "category": "WAF",
+    "headers": {
+      "X-Iinfo": ".",
+      "X-Cdn": "[Ii]mperva|[Ii]ncapsula",
+      "X-Incap-Ses": ".",
+      "Set-Cookie": "incap_ses|visid_incap"
+    },
+    "body": ["incapsula incident id", "Powered by Incapsula"]
+  },
+  {
+    "name": "Sucuri",
+    "icon": "🛡",
+    "category": "WAF",
+    "headers": {
+      "X-Sucuri-Id": ".",
+      "X-Sucuri-Cache": ".",
+      "Server": "Sucuri/Cloudproxy"
+    },
+    "body": ["sucuri\\.net", "Access Denied - Sucuri Website Firewall"]
+  },
+  {
+    "name": "ModSecurity",
+    "icon": "🛡",
+    "category": "WAF",
+    "body": ["Mod_Security|mod_security|NOYB"],
+    "headers": {"Server": "[Mm]od.?[Ss]ecurity"}
+  },
+  {
+    "name": "F5 BIG-IP ASM",
+    "icon": "🛡",
+    "category": "WAF",
+    "headers": {
+      "Set-Cookie": "BIGipServer|TS[0-9a-f]{8}",
+      "Server": "BigIP|BIG-IP"
+    },
+    "body": ["The requested URL was rejected"]
+  }
+]
