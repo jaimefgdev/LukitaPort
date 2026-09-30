@@ -10,6 +10,12 @@
   <img src="https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square" />
 </p>
 
+| Escaneo en tiempo real | Auditoría HTTP automática |
+|---|---|
+| ![Escaneo de un servidor de laboratorio: puertos abiertos con su servicio y nivel de riesgo](docs/scan.png) | ![Auditoría de cabeceras HTTP del puerto 80 con nota F y las cabeceras que faltan](docs/audit.png) |
+
+<sub>Capturas generadas con `python scripts/screenshots.py`: servicios de prueba en 127.0.0.1, sin escanear ningún host externo.</sub>
+
 ---
 
 ## ⚠️ Uso responsable
@@ -234,6 +240,8 @@ uv pip compile --universal --python-version 3.11 --generate-hashes --extra scree
 ---
 
 ## English summary
+
+Screenshots: [port scan](docs/scan.png) · [HTTP audit](docs/audit.png) (lab services on 127.0.0.1, generated with `python scripts/screenshots.py`).
 
 LukitaPort is an **educational** async TCP port scanner with a real-time web UI (SSE), HTTP security-header auditing, technology detection, sensitive-path checks, TLS analysis, NVD CVE lookup, IPv4 ping sweep, crt.sh subdomain enumeration, optional Chromium screenshots and JSON/CSV/HTML/Markdown/PDF export.
 
