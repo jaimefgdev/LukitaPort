@@ -70,3 +70,20 @@ def test_port_risk_helper():
     from config import port_risk
     assert port_risk(22) == "medium" and port_risk("3389") == "high"
     assert port_risk([1]) == "info" and port_risk(None) == "info" and port_risk("x") == "info"
+
+
+def test_reports_credit_current_author():
+    import base64
+    import re
+    import zlib
+
+    md = build_markdown_report(meta={}, results=[], summary={})
+    assert "jaimefgdev" in md and "jaimefg1888" not in md
+
+    # ReportLab page streams are ASCII85 + Flate encoded.
+    pdf = pdf_generator.generate_pdf({"meta": {}, "results": [], "summary": {}})
+    text = b"".join(
+        zlib.decompress(base64.a85decode(s.strip(), adobe=False).rstrip(b"\x00"))
+        for s in re.findall(rb"stream\r?\n(.*?)~>", pdf, re.S)
+    )
+    assert b"jaimefgdev" in text and b"jaimefg1888" not in text

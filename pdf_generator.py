@@ -318,7 +318,7 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
 
     story.append(Spacer(1, 10))
     story.append(HRFlowable(width="100%", thickness=0.5, color=C_BORDER, spaceAfter=8))
-    story.append(Paragraph(f"LukitaPort  ·  jaimefg1888  ·  For educational use only  ·  {ts}",
+    story.append(Paragraph(f"LukitaPort  ·  jaimefgdev  ·  For educational use only  ·  {ts}",
                            ParagraphStyle("ft", fontName="Courier", fontSize=7, textColor=C_MUTED, alignment=TA_CENTER)))
 
     doc.build(story)

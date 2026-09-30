@@ -96,7 +96,7 @@ export async function exportJSON() {
         const payload = {
             meta: {
                 tool:         'LukitaPort',
-                author:       'jaimefg1888',
+                author:       'jaimefgdev',
                 generated_at: new Date().toISOString(),
                 target:       state.scanMeta || {},
                 geo:          state.geoData  || {},
