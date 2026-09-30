@@ -134,6 +134,13 @@ def _error_json(status: int, code: str, detail: str, **extra: Any) -> JSONRespon
     return JSONResponse(body.model_dump(exclude_none=True), status_code=status)
 
 
+def _sse_error(msg: str, status: int) -> StreamingResponse:
+    """A one-event SSE stream ``{"error": msg, "status": status}``."""
+    async def stream() -> AsyncGenerator[str, None]:
+        yield f"data: {json.dumps({'error': msg, 'status': status})}\n\n"
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
 def _ssrf_detail(ip: str) -> str:
     return (
         f"Scanning internal addresses is not permitted (resolved: {ip}). "
@@ -256,7 +263,7 @@ async def _busy_handler(request: Request, exc: limits.Busy) -> JSONResponse:
 
 
 @app.exception_handler(RequestValidationError)
-async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+async def _validation_handler(request: Request, exc: RequestValidationError) -> Response:
     errors = [
         {"loc": list(e.get("loc", ())), "msg": str(e.get("msg", "")), "type": e.get("type", "")}
         for e in exc.errors()
@@ -265,6 +272,10 @@ async def _validation_handler(request: Request, exc: RequestValidationError) -> 
     first_msg: str  = errors[0]["msg"] if errors else "Invalid request"
     where  = ".".join(str(p) for p in first_loc if p not in ("query", "body"))
     detail = f"{where}: {first_msg}" if where else first_msg
+    if request.url.path == "/api/scan":
+        # EventSource cannot read an error response body, so the scan
+        # stream reports validation errors as an SSE event like its others.
+        return _sse_error(f"Invalid input — {detail}", 422)
     return _error_json(422, "validation_error", detail, errors=errors)
 
 
@@ -405,24 +416,19 @@ async def scan(
     (``{"error": ..., "status": ...}``) so EventSource clients can show them.
     """
 
-    def _error_stream(msg: str, status: int) -> StreamingResponse:
-        async def stream() -> AsyncGenerator[str, None]:
-            yield f"data: {json.dumps({'error': msg, 'status': status})}\n\n"
-        return StreamingResponse(stream(), media_type="text/event-stream")
-
     try:
         safe = validate_target(target)
     except ValueError as exc:
-        return _error_stream(f"Invalid target: {exc}", 422)
+        return _sse_error(f"Invalid target: {exc}", 422)
     if mode == "custom" and port_start > port_end:
-        return _error_stream(
+        return _sse_error(
             f"Invalid custom range: start port ({port_start}) is greater than end port ({port_end}).",
             422,
         )
     try:
         resolution = await _resolve_checked(safe, reverse_dns=True)
     except ApiError as exc:
-        return _error_stream(exc.detail, exc.status)
+        return _sse_error(exc.detail, exc.status)
 
     ip    = resolution["ip"]
     ports = get_port_range(mode, port_start, port_end)

@@ -41,7 +41,7 @@ def _is_loopback_host(host) -> bool:
 
 
 @pytest.fixture(autouse=True)
-def _loopback_only(monkeypatch):
+def _loopback_only(monkeypatch, request):
     real_connect    = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_getaddrinfo = socket.getaddrinfo
@@ -82,8 +82,11 @@ def _loopback_only(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
     monkeypatch.setattr(socket, "gethostbyname", guarded_gethostbyname)
     monkeypatch.setattr(socket, "gethostbyaddr", blocked_resolver)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", blocked_subprocess)
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", blocked_subprocess)
+    # Browser tests (marker "e2e") must start Chromium; they only ever load
+    # pages from a LukitaPort server on 127.0.0.1.
+    if request.node.get_closest_marker("e2e") is None:
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", blocked_subprocess)
+        monkeypatch.setattr(asyncio, "create_subprocess_shell", blocked_subprocess)
 
 
 TEST_TOKEN = "test-token-0123456789abcdef"

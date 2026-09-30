@@ -26,9 +26,8 @@ export const getRisk = p => state.portRisk[p] || state.portRisk[String(p)] || 'i
 
 export async function initConfig() {
     try {
-        const resp = await fetch('/api/config');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
+        const { apiJSON } = await import('./http.js');
+        const data = await apiJSON('/api/config');
         // Keys come as strings from JSON; keep them as-is so getRisk works with both
         state.portRisk = data.portRisk || {};
         state.geoip    = data.geoip || { enabled: false, source: null };

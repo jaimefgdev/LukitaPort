@@ -9,6 +9,15 @@ description = "Async TCP port scanner with a web UI, HTTP/TLS auditing and CVE l
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+]
 authors = [{ name = "jaimefgdev" }]
 dependencies = [
     "fastapi>=0.142",
@@ -31,7 +40,7 @@ dev = [
     "ruff>=0.16",
     "mypy>=2.3",
     "pip-audit>=2.9",
-    "pip-tools>=7.6",
+    "uv>=0.12",                   # regenerates the cross-platform lock files
 ]
 
 [tool.setuptools]
@@ -50,6 +59,9 @@ pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::FutureWarning"]
+markers = [
+    "e2e: real-browser tests (Chromium via Playwright) against a server on 127.0.0.1; skipped when no browser is installed",
+]
 
 # ── ruff ──────────────────────────────────────────────────────────────────────
 [tool.ruff]

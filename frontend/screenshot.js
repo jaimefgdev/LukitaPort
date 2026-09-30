@@ -4,6 +4,7 @@
 // server, so poll with a short interval instead of guessing a fixed delay.
 
 import { $ } from './ui.js';
+import { apiFetch } from './http.js';
 
 const POLL_INTERVAL_MS = 2_000;
 const POLL_TIMEOUT_MS  = 40_000;
@@ -24,12 +25,12 @@ export async function pollScreenshot(target) {
         if (token !== _pollToken) return false;
         let resp;
         try {
-            resp = await fetch(`/api/screenshot?target=${encodeURIComponent(target)}`);
+            // apiFetch: a 401 re-opens the sign-in dialog.
+            resp = await apiFetch(`/api/screenshot?target=${encodeURIComponent(target)}`);
         } catch {
             return false;
         }
         if (resp.status === 204) continue;           // not ready yet
-        if (!resp.ok) return false;
         renderScreenshot(await resp.blob());
         return true;
     }

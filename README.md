@@ -4,7 +4,7 @@
 > *Async TCP port scanner with a real-time web UI, HTTP/TLS auditing, CVE lookup and report export — [English summary below](#english-summary).*
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?style=flat-square&logo=python" />
+  <img src="https://img.shields.io/badge/Python-3.11%20%E2%80%93%203.14-blue?style=flat-square&logo=python" />
   <img src="https://img.shields.io/badge/FastAPI-0.142-green?style=flat-square&logo=fastapi" />
   <img src="https://img.shields.io/badge/UI-ES%20modules%2C%20sin%20build-yellow?style=flat-square&logo=javascript" />
   <img src="https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square" />
@@ -74,7 +74,9 @@ Detalles relevantes:
 
 ## Instalación
 
-Requisitos: **Python 3.11 o 3.12**. Opcionales: **nmap** (fingerprinting) y **Chromium vía Playwright** (capturas).
+Requisitos: **Python 3.11 a 3.14** en Linux, macOS o Windows. Opcionales: **nmap** (fingerprinting) y **Chromium vía Playwright** (capturas).
+
+**Linux / macOS:**
 
 ```bash
 git clone https://github.com/jaimefgdev/LukitaPort.git
@@ -82,10 +84,27 @@ cd LukitaPort
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt          # versiones fijadas y verificadas por hash
 playwright install --with-deps chromium  # opcional: capturas de pantalla
-sudo apt install nmap                    # opcional: fingerprinting (brew/winget en macOS/Windows)
+sudo apt install nmap                    # opcional: fingerprinting (brew install nmap en macOS)
 ```
 
-`requirements.txt` y `requirements-dev.txt` se generan con `pip-compile` a partir de `pyproject.toml` (ver [Desarrollo](#desarrollo)).
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/jaimefgdev/LukitaPort.git
+cd LukitaPort
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt          # uvloop se omite en Windows (marcador de plataforma)
+playwright install chromium              # opcional: capturas de pantalla
+winget install Insecure.Nmap             # opcional: fingerprinting
+python run.py
+```
+
+Notas para Windows:
+- `uvloop` no existe para Windows. El lock lo marca con `sys_platform != 'win32'`, así que pip lo omite y uvicorn usa el bucle de eventos estándar.
+- Windows reintenta el SYN al recibir un RST, así que un puerto cerrado tardaría ~2 s en dar «rechazado». El escáner lo desactiva por socket (`SIO_TCP_INITIAL_RTO`, Windows 10 1703 o posterior) para que los puertos cerrados salgan como «cerrado» y no como «filtrado». En versiones anteriores espera hasta 2,5 s antes de clasificarlos.
+
+`requirements.txt` y `requirements-dev.txt` son ficheros de bloqueo multiplataforma generados con `uv pip compile --universal` a partir de `pyproject.toml` (ver [Desarrollo](#desarrollo)).
 
 ## Ejecución
 
@@ -157,6 +176,7 @@ Todas las rutas `/api/` requieren el token, salvo `/api/auth`, `/api/auth/status
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest               # tests de Python
+python -m pytest -m e2e        # tests de la interfaz en Chromium (requiere `playwright install chromium`)
 node --test 'frontend/tests/*.test.mjs'   # tests del frontend (Node 22)
 ruff check . && mypy .         # lint y tipos
 pip-audit -r requirements.txt  # vulnerabilidades conocidas
@@ -164,16 +184,22 @@ pip-audit -r requirements.txt  # vulnerabilidades conocidas
 
 **Regla de las pruebas:**
 - Nunca se escanea ni se contacta un host externo. Los tests usan solo `127.0.0.1` con servidores que levanta el propio test, o sockets, DNS y subprocesos simulados.
-- `tests/conftest.py` lo impone: un `connect` fuera de loopback, una resolución DNS de un nombre externo o un subproceso hacen fallar el test.
+- `tests/conftest.py` lo impone: un `connect` fuera de loopback, una resolución DNS de un nombre externo o un subproceso hacen fallar el test. La única excepción son los tests `e2e`, que pueden lanzar Chromium, y este solo carga páginas de un LukitaPort en `127.0.0.1`.
 
 **Actualizar dependencias:** edita `pyproject.toml` y regenera los ficheros de bloqueo:
 
 ```bash
-pip-compile --strip-extras --generate-hashes --allow-unsafe --extra screenshots -o requirements.txt pyproject.toml
-pip-compile --strip-extras --generate-hashes --allow-unsafe --extra screenshots --extra dev -o requirements-dev.txt pyproject.toml
+uv pip compile --universal --python-version 3.11 --generate-hashes --extra screenshots -o requirements.txt pyproject.toml
+uv pip compile --universal --python-version 3.11 --generate-hashes --extra screenshots --extra dev -o requirements-dev.txt pyproject.toml
 ```
 
-**CI** (GitHub Actions): ruff, mypy, pytest (3.11 y 3.12), pip-audit, tests del frontend y construcción de la imagen lite con una prueba de arranque.
+`--universal` conserva los marcadores de plataforma (por ejemplo, `uvloop ; sys_platform != 'win32'`), así que el mismo lock sirve en Linux, macOS y Windows. `tests/test_packaging.py` lo comprueba.
+
+**CI** (GitHub Actions):
+- ruff y mypy.
+- pytest en Linux (3.11, 3.12 y 3.14) y en Windows (3.12 y 3.14).
+- Tests de la interfaz en Chromium, pip-audit y tests del frontend.
+- Imagen lite con prueba de arranque, e imagen completa con una captura real hecha dentro del contenedor.
 
 ## Estructura
 
@@ -200,7 +226,7 @@ pip-compile --strip-extras --generate-hashes --allow-unsafe --extra screenshots 
 ├── frontend/          UI (index.html, *.js, styles.css) + tests de node
 ├── tests/             pytest (solo loopback o simulaciones)
 ├── pyproject.toml     metadatos, dependencias, ruff/mypy/pytest
-├── requirements*.txt  ficheros de bloqueo (pip-compile, con hashes)
+├── requirements*.txt  ficheros de bloqueo (uv --universal, con hashes)
 ├── Dockerfile, docker-compose.yml, .dockerignore
 └── .env.example
 ```
@@ -213,7 +239,7 @@ LukitaPort is an **educational** async TCP port scanner with a real-time web UI 
 
 **Responsible use:** only scan systems you own or are explicitly authorised in writing to test. The tool is **not anonymous**: the "stealth (slow)" mode only lowers the rate and randomises timing and port order.
 
-**Quick start:** `pip install -r requirements.txt && python run.py`, then open the login URL printed on the console.
+**Quick start:** `pip install -r requirements.txt && python run.py`, then open the login URL printed on the console. Works on Linux, macOS and Windows with Python 3.11–3.14 (the lock files carry platform markers, e.g. `uvloop` is skipped on Windows).
 
 **Security defaults:**
 - Listens on 127.0.0.1 only.
