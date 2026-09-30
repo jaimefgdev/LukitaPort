@@ -39,6 +39,7 @@ environment — useful for scanning internal lab networks.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
 from contextlib import asynccontextmanager
@@ -229,13 +230,28 @@ def _validate_target(target: str) -> tuple[Optional[str], Optional[Response]]:
     return None, _bad(f"Invalid target: '{t}' is not a valid IPv4, IPv6, or RFC 1123 hostname.")
 
 
+# Widest network /api/discover accepts: a /22 holds 1022 usable hosts, which
+# matches the upper bound of ``max_hosts``.  IPv6 sweeps are rejected
+# outright — even a /120 is pointless to ping-sweep and a /64 cannot be
+# enumerated at all.
+DISCOVER_MIN_IPV4_PREFIX = 22
+
+
 def _validate_cidr(
     cidr: str,
-) -> tuple[Optional[ipaddress.IPv4Network | ipaddress.IPv6Network], Optional[Response]]:
+) -> tuple[Optional[ipaddress.IPv4Network], Optional[Response]]:
     try:
-        return ipaddress.ip_network(cidr.strip(), strict=False), None
+        network = ipaddress.ip_network(cidr.strip(), strict=False)
     except ValueError as exc:
         return None, _bad(f"Invalid CIDR: {exc}")
+    if network.version != 4:
+        return None, _bad("Invalid CIDR: only IPv4 networks can be discovered.")
+    if network.prefixlen < DISCOVER_MIN_IPV4_PREFIX:
+        return None, _bad(
+            f"Invalid CIDR: network too large (/{network.prefixlen}); "
+            f"the widest allowed is /{DISCOVER_MIN_IPV4_PREFIX}."
+        )
+    return network, None
 
 
 def _validate_domain(domain: str) -> tuple[Optional[str], Optional[Response]]:
@@ -449,7 +465,8 @@ async def discover(
     network, err = _validate_cidr(cidr)
     if err:
         return err
-    hosts = list(network.hosts())[:max_hosts]
+    # islice: never materialise more host objects than will be pinged.
+    hosts = list(itertools.islice(network.hosts(), max_hosts))
     if not hosts:
         return _json_response({"error": "No hosts in range", "alive": []})
 

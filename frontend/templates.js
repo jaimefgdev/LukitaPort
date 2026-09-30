@@ -319,6 +319,7 @@ export function tmplSSLAudit(data, lang) {
             ['Not After',  ssl.not_after  ? ssl.not_after.slice(0, 10)  : '—'],
             [lang === 'es' ? 'Días restantes' : 'Days left',  ssl.days_until_expiry !== null ? ssl.days_until_expiry + 'd' : '—'],
             [lang === 'es' ? 'Autofirmado'   : 'Self-signed', ssl.self_signed ? '⚠ Yes' : '✓ No'],
+            [lang === 'es' ? 'Confianza'     : 'Trusted',     ssl.trusted ? '✓ Yes' : '⚠ No' + (ssl.verify_error ? ' — ' + ssl.verify_error : '')],
         ].forEach(([k, v]) => {
             const isWarn = (k.includes('restante') || k.includes('left')) && ssl.expiring_soon;
             const isErr  = (k.includes('restante') || k.includes('left')) && ssl.expired;
