@@ -2,11 +2,12 @@
 ssl_analyzer.py
 ───────────────
 SSL/TLS certificate and cipher-suite analyser with:
-  • Per-port granular TLS version enumeration (probes SSLv3 → TLSv1.3).
-  • Detailed grading rubric: A+ / A / B / C / D / F.
-  • HSTS preload check, CT log presence, OCSP stapling flag.
-  • Fully type-annotated; no blocking I/O on the event loop
-    (callers wrap in run_in_executor).
+  • Certificate parsing (subject, issuer, SANs, validity) and a separate
+    verified handshake to report whether the chain is trusted.
+  • Per-port TLS version enumeration (TLS 1.0 → 1.3; versions the local
+    OpenSSL cannot offer are reported as untested).
+  • Grading rubric: A+ / A / B / C / D / F.
+  • Synchronous (blocking) I/O: callers run it in an executor.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import ipaddress
 import ssl
 import socket
+import warnings
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -37,16 +39,6 @@ DEPRECATED_PROTOCOLS: frozenset[str] = frozenset(
 )
 
 STRONG_PROTOCOLS: frozenset[str] = frozenset({"TLSv1.2", "TLSv1.3"})
-
-# Maps ssl.PROTOCOL_* constants → human label for probing
-_PROBE_PROTOCOLS: list[tuple[str, Optional[int]]] = [
-    # Highest first so we report what the server *prefers*
-    ("TLSv1.3",  None),    # auto-negotiated by modern OpenSSL
-    ("TLSv1.2",  ssl.PROTOCOL_TLS_CLIENT if hasattr(ssl, "PROTOCOL_TLS_CLIENT") else None),
-    ("TLSv1.1",  None),
-    ("TLSv1.0",  None),
-    ("SSLv3",    None),
-]
 
 # cipher keyword → human-readable weakness label
 _WEAK_CIPHER_LABELS: dict[str, str] = {
@@ -139,76 +131,77 @@ def _detect_weak_ciphers(cipher_name: str) -> list[str]:
     ]
 
 
+# (label, TLSVersion attribute, ssl.HAS_* flag)
+_PROBE_VERSIONS: tuple[tuple[str, str, str], ...] = (
+    ("TLSv1.3", "TLSv1_3", "HAS_TLSv1_3"),
+    ("TLSv1.2", "TLSv1_2", "HAS_TLSv1_2"),
+    ("TLSv1.1", "TLSv1_1", "HAS_TLSv1_1"),
+    ("TLSv1.0", "TLSv1",   "HAS_TLSv1"),
+)
+_LEGACY_VERSIONS = frozenset({"TLSv1.1", "TLSv1.0"})
+
+
+def _client_can_probe(label: str, attr: str, has_flag: str) -> bool:
+    return bool(getattr(ssl, has_flag, False)) and hasattr(ssl.TLSVersion, attr)
+
+
+def _accepts_version(
+    hostname: str,
+    port: int,
+    timeout: float,
+    label: str,
+    attr: str,
+    connect_host: Optional[str],
+) -> bool:
+    version = getattr(ssl.TLSVersion, attr)
+    with warnings.catch_warnings():
+        # Pinning TLS 1.0/1.1 is deprecated in Python — which is exactly the
+        # point of probing for it.
+        warnings.simplefilter("ignore", DeprecationWarning)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode    = ssl.CERT_NONE
+        ctx.minimum_version = version
+        ctx.maximum_version = version
+        if label in _LEGACY_VERSIONS:
+            # Modern OpenSSL refuses TLS < 1.2 at the default security level
+            # regardless of what the server supports; drop to level 0 so
+            # the probe reflects the *server*.
+            try:
+                ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+            except ssl.SSLError:
+                pass
+    try:
+        with socket.create_connection((connect_host or hostname, port), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=hostname) as tls:
+                return tls.version() == label.replace("TLSv1.0", "TLSv1")
+    except (ssl.SSLError, OSError):
+        return False
+
+
 def _probe_tls_versions(
     hostname: str,
     port: int,
     timeout: float,
     connect_host: Optional[str] = None,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """
-    Probe which TLS versions the server will accept.
+    Probe which TLS versions (1.0–1.3) the server accepts, one handshake per
+    version.
 
-    Returns a sorted list of accepted version strings, e.g.
-    ["TLSv1.2", "TLSv1.3"].  Uses a best-effort approach; unsupported
-    versions on the *client* side are silently skipped.
+    Returns ``(accepted, untested)``: ``untested`` lists versions the local
+    OpenSSL build cannot offer at all, so no conclusion is possible for them.
+    SSLv2/SSLv3 are not probed (not available in any supported OpenSSL).
     """
     accepted: list[str] = []
-
-    # ── TLSv1.3 ──────────────────────────────────────────────────────────────
-    try:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode    = ssl.CERT_NONE
-        # Force TLS 1.3 only if the platform supports it
-        if hasattr(ssl, "TLSVersion"):
-            ctx.minimum_version = ssl.TLSVersion.TLSv1_3  # type: ignore[attr-defined]
-            ctx.maximum_version = ssl.TLSVersion.TLSv1_3  # type: ignore[attr-defined]
-        with socket.create_connection((connect_host or hostname, port), timeout=timeout) as raw:
-            with ctx.wrap_socket(raw, server_hostname=hostname) as tls:
-                if tls.version() in ("TLSv1.3",):
-                    accepted.append("TLSv1.3")
-    except (ssl.SSLError, OSError, AttributeError):
-        pass
-
-    # ── TLSv1.2 ──────────────────────────────────────────────────────────────
-    try:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode    = ssl.CERT_NONE
-        if hasattr(ssl, "TLSVersion"):
-            ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # type: ignore[attr-defined]
-            ctx.maximum_version = ssl.TLSVersion.TLSv1_2  # type: ignore[attr-defined]
-        with socket.create_connection((connect_host or hostname, port), timeout=timeout) as raw:
-            with ctx.wrap_socket(raw, server_hostname=hostname) as tls:
-                if tls.version() in ("TLSv1.2",):
-                    accepted.append("TLSv1.2")
-    except (ssl.SSLError, OSError, AttributeError):
-        pass
-
-    # ── TLSv1.1 (legacy probe) ─────────────────────────────────────────────
-    for ver_label, min_attr, max_attr in [
-        ("TLSv1.1", "TLSv1_1", "TLSv1_1"),
-        ("TLSv1.0", "TLSv1",   "TLSv1"),
-    ]:
-        try:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ctx.check_hostname = False
-            ctx.verify_mode    = ssl.CERT_NONE
-            min_ver = getattr(ssl.TLSVersion, min_attr, None)  # type: ignore[attr-defined]
-            max_ver = getattr(ssl.TLSVersion, max_attr, None)  # type: ignore[attr-defined]
-            if min_ver is None or max_ver is None:
-                continue
-            ctx.minimum_version = min_ver
-            ctx.maximum_version = max_ver
-            with socket.create_connection((connect_host or hostname, port), timeout=timeout) as raw:
-                with ctx.wrap_socket(raw, server_hostname=hostname) as tls:
-                    negotiated = tls.version() or ""
-                    if ver_label in negotiated:
-                        accepted.append(ver_label)
-        except (ssl.SSLError, OSError, AttributeError):
-            pass
-
-    return sorted(accepted)
+    untested: list[str] = []
+    for label, attr, has_flag in _PROBE_VERSIONS:
+        if not _client_can_probe(label, attr, has_flag):
+            untested.append(label)
+            continue
+        if _accepts_version(hostname, port, timeout, label, attr, connect_host):
+            accepted.append(label)
+    return sorted(accepted), untested
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -309,6 +302,7 @@ def analyze_ssl(
         "grade":                "F",
         "issues":               [],
         "tls_versions_offered": [],
+        "tls_versions_untested": [],
     }
 
     # ── Primary handshake ─────────────────────────────────────────────────────
@@ -403,8 +397,9 @@ def analyze_ssl(
 
     # ── TLS version enumeration ───────────────────────────────────────────────
     try:
-        versions = _probe_tls_versions(hostname, port, min(timeout, 5.0), connect_host)
-        result["tls_versions_offered"] = versions
+        versions, untested = _probe_tls_versions(hostname, port, min(timeout, 5.0), connect_host)
+        result["tls_versions_offered"]  = versions
+        result["tls_versions_untested"] = untested
         deprecated_offered = [v for v in versions if v in DEPRECATED_PROTOCOLS]
         for dv in deprecated_offered:
             msg = f"Server accepts deprecated {dv}"

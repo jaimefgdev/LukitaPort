@@ -4,8 +4,8 @@
 // CSP compliance changes vs previous version
 // ──────────────────────────────────────────
 // • window.launchCVELookup removed — CVE launch now handled by event delegation.
-// • window._pollScreenshot removed — converted to module-local async function
-//   pollScreenshot() exported for api.js to call directly after screenshot POST.
+// • window._pollScreenshot removed — pollScreenshot() lives in screenshot.js
+//   and api.js calls it right after the capture POST.
 // • All inline onclick / onmouseover / onmouseout attributes have been removed
 //   from templates.js / ui.js.  A single delegate on document.body intercepts
 //   data-action clicks for: "copy", "launch-cve", "scan-host".
@@ -179,26 +179,32 @@ $('history-list')?.addEventListener('click', async e => {
     startScan();
 });
 
-// ── Anon mode toggle ───────────────────────────────────────────────────────────
-document.getElementById('anon-mode')?.addEventListener('change', function () {
-    const dot    = document.getElementById('anon-dot');
-    const status = document.getElementById('anon-status');
+// ── Slow ("sigiloso") mode toggle ─────────────────────────────────────────────
+// Sends profile=slow: 3 parallel probes, random 0.5–3 s delays, random port
+// order.  It does not anonymise anything — the UI says so explicitly.
+document.getElementById('slow-mode')?.addEventListener('change', function () {
+    const dot    = document.getElementById('slow-dot');
+    const status = document.getElementById('slow-status');
+    const note   = document.getElementById('slow-note');
+    const profileSel = document.getElementById('scan-profile');
     if (this.checked) {
-        dot.style.background = '#00ff88';
-        dot.style.boxShadow  = '0 0 8px #00ff88';
-        const profileSel = document.getElementById('scan-profile');
-        if (profileSel) profileSel.value = 'stealth';
-        if (status) status.innerHTML = `<span class="es" style="color:#00cc66">✓ Activado — perfil Stealth forzado · delays aleatorios</span><span class="en" style="color:#00cc66">✓ Enabled — Stealth profile forced · random delays</span>`;
+        dot.style.background = '#ffaa00';
+        dot.style.boxShadow  = '0 0 8px #ffaa00';
+        if (profileSel) profileSel.disabled = true;
+        if (status) status.innerHTML = `<span class="es" style="color:#ffaa00">✓ Activado — lento</span><span class="en" style="color:#ffaa00">✓ On — slow</span>`;
     } else {
         dot.style.background = '#333';
         dot.style.boxShadow  = 'none';
-        if (status) status.innerHTML = `<span class="es">Desactivado — fuerza perfil Stealth + delays aleatorios</span><span class="en">Disabled — forces Stealth profile + random delays</span>`;
+        if (profileSel) profileSel.disabled = false;
+        if (status) status.innerHTML = `<span class="es">Desactivado</span><span class="en">Off</span>`;
     }
+    if (note) note.hidden = !this.checked;
 });
 
 document.querySelector('.anon-toggle')?.addEventListener('click', function (e) {
-    if (e.target.tagName === 'BUTTON') return;
-    const cb = document.getElementById('anon-mode');
+    if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return;
+    e.preventDefault();
+    const cb = document.getElementById('slow-mode');
     if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
 });
 
@@ -222,42 +228,3 @@ $('btn-subdomains')?.addEventListener('click', launchSubdomains);
 $('subdomain-input')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') launchSubdomains();
 });
-
-// ── Screenshot polling ────────────────────────────────────────────────────────
-/**
- * pollScreenshot — wait for a backend screenshot and render it when ready.
- *
- * Previously lived on window._pollScreenshot (CSP violation).
- * Now a module-level async function exported so api.js can call it
- * directly after triggering the capture POST.
- *
- * @param {string} target  Hostname or IP passed to /api/screenshot
- */
-export async function pollScreenshot(target) {
-    await new Promise(r => setTimeout(r, 12_000));
-    try {
-        const resp = await fetch(`/api/screenshot?target=${encodeURIComponent(target)}`);
-        if (resp.status === 200) {
-            const blob    = await resp.blob();
-            const imgUrl  = URL.createObjectURL(blob);
-            const pane    = $('pane-screenshot');
-            if (pane) {
-                // img.src is a blob: URL — safe, no XSS risk
-                const img         = document.createElement('img');
-                img.src           = imgUrl;
-                img.alt           = 'Screenshot';
-                img.style.cssText = 'width:100%;border-radius:4px;border:1px solid #1e1e1e';
-
-                const wrapper         = document.createElement('div');
-                wrapper.style.padding = '20px';
-                wrapper.appendChild(img);
-
-                pane.innerHTML = '';
-                pane.appendChild(wrapper);
-
-                const screenshotTab = document.querySelector('.audit-tab[data-pane="screenshot"]');
-                if (screenshotTab) screenshotTab.style.display = 'inline-flex';
-            }
-        }
-    } catch { /* screenshot unavailable — silently ignore */ }
-}

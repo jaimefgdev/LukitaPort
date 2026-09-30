@@ -93,3 +93,66 @@ def test_analyze_for_ports_only_https_ports():
     assert analyze_ssl_for_ports("127.0.0.1", [22, 80]) == {
         "error": "No HTTPS ports detected", "results": {},
     }
+
+
+# ── Point 18: TLS version probing ─────────────────────────────────────────────
+
+import ssl
+import warnings
+
+import ssl_analyzer
+
+
+@pytest.fixture
+def leaf(tmp_path):
+    cert, key = make_cert("localhost", sans=("localhost",))
+    return write_pem(tmp_path, "leaf", cert, key)
+
+
+def test_tls12_only_server(leaf):
+    with LoopbackTLSServer(*leaf, minimum_version=ssl.TLSVersion.TLSv1_2,
+                           maximum_version=ssl.TLSVersion.TLSv1_2) as srv:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            accepted, untested = ssl_analyzer._probe_tls_versions("127.0.0.1", srv.port, 3)
+    assert accepted == ["TLSv1.2"]
+    assert "TLSv1.2" not in untested and "TLSv1.3" not in untested
+
+
+def test_tls13_only_server(leaf):
+    with LoopbackTLSServer(*leaf, minimum_version=ssl.TLSVersion.TLSv1_3) as srv:
+        accepted, _ = ssl_analyzer._probe_tls_versions("127.0.0.1", srv.port, 3)
+    assert accepted == ["TLSv1.3"]
+
+
+def _local_openssl_can_serve_tls10(leaf) -> bool:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            with LoopbackTLSServer(*leaf, minimum_version=ssl.TLSVersion.TLSv1,
+                                   maximum_version=ssl.TLSVersion.TLSv1,
+                                   ciphers="DEFAULT:@SECLEVEL=0") as srv:
+                return ssl_analyzer._accepts_version(
+                    "127.0.0.1", srv.port, 3, "TLSv1.0", "TLSv1", None)
+    except (ssl.SSLError, ValueError):
+        return False
+
+
+def test_legacy_tls10_is_detected(leaf):
+    if not _local_openssl_can_serve_tls10(leaf):
+        pytest.skip("this OpenSSL build cannot negotiate TLS 1.0 at all")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        with LoopbackTLSServer(*leaf, minimum_version=ssl.TLSVersion.TLSv1,
+                               ciphers="DEFAULT:@SECLEVEL=0") as srv:
+            accepted, _ = ssl_analyzer._probe_tls_versions("127.0.0.1", srv.port, 3)
+    assert "TLSv1.0" in accepted
+
+
+def test_versions_client_cannot_offer_are_untested(leaf, monkeypatch):
+    monkeypatch.setattr(ssl, "HAS_TLSv1", False)
+    monkeypatch.setattr(ssl, "HAS_TLSv1_1", False)
+    with LoopbackTLSServer(*leaf) as srv:
+        res = analyze_ssl("127.0.0.1", srv.port, timeout=3)
+    assert res["tls_versions_untested"] == ["TLSv1.1", "TLSv1.0"]
+    assert "TLSv1.0" not in res["tls_versions_offered"]
