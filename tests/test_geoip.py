@@ -10,10 +10,11 @@ import scan_service
 @pytest.fixture
 def resolved(monkeypatch):
     """Resolve targets without any DNS (not even reverse lookups)."""
-    monkeypatch.setattr(main, "resolve_target", lambda t: {
-        "input": t, "ip": t, "hostname": None, "resolved": False,
-        "error": None, "addresses": [t],
-    })
+    async def fake_resolve(t, reverse_dns=False):
+        return {"input": t, "ip": t, "hostname": None, "ptr": None,
+                "resolved": False, "error": None, "addresses": [t]}
+
+    monkeypatch.setattr(main, "resolve_target", fake_resolve)
 
 
 def test_disabled_by_default(app_client, resolved):

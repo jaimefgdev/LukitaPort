@@ -65,8 +65,8 @@ The backend is a Python / FastAPI async server. The frontend is a CSP-compliant 
 ### Scanning Engine
 - **Async TCP port scanner** — `asyncio` connect probes, configurable timeout and concurrency
 - **Scan modes** — Quick (top 100), Custom (user-defined range), Full (1–65535)
-- **Scan profiles** — Normal, Stealth (random delays, slower rate), Aggressive (higher concurrency)
-- **Anonymous mode** — forces Stealth profile and applies random per-port jitter
+- **Scan profiles** — Normal, Stealth (10 parallel probes, fixed 0.5 s delay), Aggressive (higher concurrency, capped by the open-files limit)
+- **Stealth (slow) mode** — `slow` profile: 3 parallel probes, random 0.5–3 s delays and random port order. It does **not** anonymise: the target still sees your IP
 - **Real-time SSE stream** — server pushes `meta`, `port`, `done` events; browser renders rows as they arrive
 - **GeoIP enrichment** — country, city, ASN, ISP, flag emoji from the resolved IP
 - **nmap fingerprinting** — version detection (`-sV`) on open ports via subprocess bridge
@@ -295,11 +295,10 @@ Streams port scan results as Server-Sent Events.
 |---|---|---|---|
 | `target` | string | required | Host to scan |
 | `mode` | `quick\|custom\|full` | `quick` | Port range preset |
-| `profile` | `normal\|stealth\|aggressive` | `normal` | Scan behaviour |
+| `profile` | `normal\|stealth\|aggressive\|slow` | `normal` | Scan behaviour |
 | `port_start` | int | 1 | Start of custom range |
 | `port_end` | int | 1024 | End of custom range |
 | `timeout` | float | 1.0 | Per-port timeout in seconds |
-| `anon` | `0\|1` | `0` | Force stealth + random delays |
 
 **Event types:**
 ```
@@ -511,8 +510,8 @@ El backend es un servidor Python/FastAPI asíncrono. El frontend es una aplicaci
 ### Motor de Escaneo
 - **Escáner TCP asíncrono** — sondas de conexión `asyncio`, timeout y concurrencia configurables
 - **Modos de escaneo** — Rápido (top 100), Personalizado (rango definido por el usuario), Completo (1–65535)
-- **Perfiles** — Normal, Stealth (delays aleatorios, tasa reducida), Agresivo (mayor concurrencia)
-- **Modo anónimo** — fuerza el perfil Stealth y aplica jitter aleatorio por puerto
+- **Perfiles** — Normal, Discreto/Stealth (10 sondas en paralelo, retardo fijo de 0,5 s), Agresivo (más concurrencia, limitada por el máximo de ficheros abiertos)
+- **Modo sigiloso (lento)** — perfil `slow`: 3 sondas en paralelo, retardos aleatorios de 0,5–3 s y puertos en orden aleatorio. **No anonimiza**: el objetivo sigue viendo tu IP
 - **Stream SSE en tiempo real** — el servidor envía eventos `meta`, `port`, `done`; el navegador renderiza filas al recibirlos
 - **Enriquecimiento GeoIP** — país, ciudad, ASN, ISP, emoji de bandera desde la IP resuelta
 - **Fingerprinting con nmap** — detección de versiones (`-sV`) en puertos abiertos mediante subproceso
@@ -740,11 +739,10 @@ Envía los resultados del escaneo como Server-Sent Events.
 |---|---|---|---|
 | `target` | string | obligatorio | Host a escanear |
 | `mode` | `quick\|custom\|full` | `quick` | Preset de rango de puertos |
-| `profile` | `normal\|stealth\|aggressive` | `normal` | Comportamiento del escaneo |
+| `profile` | `normal\|stealth\|aggressive\|slow` | `normal` | Comportamiento del escaneo |
 | `port_start` | int | 1 | Inicio del rango personalizado |
 | `port_end` | int | 1024 | Fin del rango personalizado |
 | `timeout` | float | 1.0 | Timeout por puerto en segundos |
-| `anon` | `0\|1` | `0` | Forzar stealth + delays aleatorios |
 
 **Tipos de evento:**
 ```

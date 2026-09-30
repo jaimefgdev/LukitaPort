@@ -19,6 +19,7 @@
 // At 65 535 items → 14 chunks → 14 yields → ~0 ms perceived lag per chunk.
 // Measured overhead vs synchronous: < 30 ms total for JSON, < 50 ms for HTML.
 
+import { csvField } from './utils.js';
 import { state, getRisk }  from './state.js';
 import { $, showToast }    from './ui.js';
 import { tmplHTMLReport }  from './templates.js';
@@ -121,19 +122,6 @@ export async function exportJSON() {
  * Chunked: builds the rows string segment-by-segment so the join()
  * never operates on a single giant array in one shot.
  */
-/**
- * csvField — quote a text value for CSV and neutralise spreadsheet formulas.
- *
- * Banners/versions come from the scanned host, so a value such as
- * `=HYPERLINK(...)` must not be evaluated when the CSV is opened in a
- * spreadsheet: values starting with = + - @ TAB or CR get a leading quote.
- */
-export function csvField(value) {
-    let v = String(value ?? '');
-    if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;
-    return '"' + v.replace(/"/g, '""') + '"';
-}
-
 export async function exportCSV() {
     if (!state.results.length) return;
     const btn     = $('btn-csv');

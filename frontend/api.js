@@ -19,6 +19,10 @@ import { $, showToast, appendRow, renderTable, updateSummary, setDotBlink,
          renderCVEAudit, renderCVEPlaceholder, renderGeo,
          flushAndDrain, escapeHTML }  from './ui.js';
 import { tmplDiscoverOutput, tmplSubdomainsOutput, tmplCVELoading } from './templates.js';
+import { cleanTarget, validatePortRange } from './utils.js';
+import { pollScreenshot, resetScreenshot } from './screenshot.js';
+
+export { cleanTarget };
 
 // ── Timeout constants (must match backend config) ─────────────────────────────
 const NMAP_BASE_TIMEOUT_SEC   = 20;
@@ -43,13 +47,6 @@ function clearController(key) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-export function cleanTarget(raw) {
-    let t = raw.trim().replace(/^https?:\/\//i, '').split('/')[0].split('?')[0].split('#')[0];
-    const isIP = /^\d{1,3}(\.\d{1,3}){3}$/.test(t.split(':')[0]);
-    if (!isIP) t = t.split(':')[0];
-    return t.trim();
-}
-
 function getTs()   { return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19); }
 function getSlug() { return (state.scanMeta?.ip ?? 'scan').replace(/\./g, '_'); }
 
@@ -108,6 +105,20 @@ export function startScan() {
     $('target').value = target;
     $('target').style.borderColor = '';
 
+    const mode = $('scan-mode').value;
+    if (mode === 'custom') {
+        const rangeErr = validatePortRange($('port-start').value, $('port-end').value);
+        if (rangeErr) {
+            const msgs = {
+                inverted:     { es: 'El puerto inicial es mayor que el final.', en: 'Start port is greater than end port.' },
+                out_of_range: { es: 'Los puertos deben estar entre 1 y 65535.', en: 'Ports must be between 1 and 65535.' },
+                not_integer:  { es: 'Los puertos deben ser números enteros.',   en: 'Ports must be whole numbers.' },
+            };
+            showToast(msgs[rangeErr][state.lang], 'error');
+            return;
+        }
+    }
+
     state.results   = [];
     state.counts    = { open: 0, closed: 0, filtered: 0 };
     state.scanMeta  = null;
@@ -132,25 +143,20 @@ export function startScan() {
     setDotBlink(true);
     updateSummary();
 
-    const mode    = $('scan-mode').value;
-    const profile = $('scan-profile').value;
-    const anonEl  = document.getElementById('anon-mode');
-    const isAnon  = anonEl?.checked || false;
+    resetScreenshot();
 
-    const effectiveProfile = isAnon ? 'stealth' : profile;
-    if (isAnon) {
-        const dot = document.getElementById('anon-dot');
-        if (dot) { dot.style.background = '#00ff88'; dot.style.boxShadow = '0 0 6px #00ff88'; }
-    }
+    // "Sigiloso (lento)" = the backend "slow" profile: few parallel probes,
+    // random delays and random port order.  It does NOT hide the scanner's IP.
+    const slowMode = document.getElementById('slow-mode')?.checked || false;
+    const profile  = slowMode ? 'slow' : $('scan-profile').value;
 
     const params = new URLSearchParams({
         target,
         mode,
-        profile: effectiveProfile,
+        profile,
         port_start: $('port-start').value,
         port_end:   $('port-end').value,
         timeout:    $('timeout').value,
-        anon:       isAnon ? '1' : '0',
     });
 
     // Hermetically destroy any existing EventSource before creating a new one
@@ -180,8 +186,9 @@ export function startScan() {
 
         if (d.type === 'meta') {
             state.scanMeta = d;
-            $('status-target').textContent = (d.hostname && d.hostname !== d.ip)
-                ? d.hostname + ' (' + d.ip + ')'
+            const name = d.hostname || d.ptr;
+            $('status-target').textContent = (name && name !== d.ip)
+                ? name + ' (' + d.ip + ')'
                 : d.ip;
             $('st-total').textContent = d.total_ports;
             if (d.geo && Object.keys(d.geo).length) {
@@ -259,6 +266,9 @@ export function stopScan(completed = false) {
                 const firstWebPort     = webPorts[0];
                 const screenshotTarget = state.scanMeta.hostname || state.scanMeta.ip;
                 fetch(`/api/screenshot/capture?target=${encodeURIComponent(screenshotTarget)}&port=${firstWebPort.port}`, { method: 'POST' })
+                    .then(r => (r.ok ? r.json() : null))
+                    // Poll with the key the server stores the capture under.
+                    .then(d => { if (d?.target) pollScreenshot(d.target); })
                     .catch(() => {});
             }
             if (state.counts.open > 0) {
@@ -335,7 +345,16 @@ export async function runFingerprint() {
             if (isNaN(p)) return;
             const vStr = [info.product, info.version, info.extrainfo].filter(Boolean).join(' ').trim()
                       || info.banner || '';
-            if (vStr) { state.versions[p] = { version: vStr, source: 'nmap', cpe: info.cpe || '' }; updated++; }
+            if (vStr) {
+                state.versions[p] = {
+                    version:    vStr,                 // display string
+                    product:    info.product || '',   // for the CVE query
+                    rawVersion: info.version || '',
+                    cpe:        info.cpe || '',
+                    source:     'nmap',
+                };
+                updated++;
+            }
         });
 
         import('./ui.js').then(({ renderTable }) => renderTable());
@@ -437,10 +456,14 @@ export async function launchCVELookup() {
     }
 
     const versionsPayload = {};
-    openPorts.forEach(r => {
+    // The backend queries NVD by CPE, or by "product version"; ports without
+    // fingerprint data are reported back as skipped (not searched by the bare
+    // service name, which only produced noise).
+    openPorts.slice(0, 20).forEach(r => {
         const v = state.versions[r.port];
-        if (v?.version) versionsPayload[r.port] = { name: r.service, version: v.version };
-        else if (r.service && r.service !== 'Unknown') versionsPayload[r.port] = { name: r.service, version: '' };
+        versionsPayload[r.port] = v
+            ? { name: r.service || '', product: v.product || '', version: v.rawVersion || '', cpe: v.cpe || '' }
+            : { name: r.service || '' };
     });
 
     if (!Object.keys(versionsPayload).length) {

@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "LukitaPort UI — native ES modules, no build step. Tests: node --test frontend/tests/*.test.mjs"
+}
