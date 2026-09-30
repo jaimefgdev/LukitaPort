@@ -86,18 +86,64 @@ def _loopback_only(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_shell", blocked_subprocess)
 
 
-@pytest.fixture
-def app_client(monkeypatch):
-    """
-    FastAPI TestClient with the full lifespan (startup + shutdown).
+TEST_TOKEN = "test-token-0123456789abcdef"
 
-    Playwright is made unimportable so no Chromium is launched; the lifespan
-    must degrade gracefully in that case.
+
+@pytest.fixture(autouse=True)
+def _security_env(monkeypatch):
     """
+    Deterministic security settings for every test: a known API token, the
+    TestClient host allowed, no GeoIP, private IPs blocked, and fresh caches
+    / limiter counters.  Tests may override the environment and call
+    ``security.reset_settings()``.
+    """
+    import limits
+    import security
+
+    for var in (
+        "LUKITA_HOST", "LUKITA_ENABLE_ADMIN", "LUKITA_RATE_LIMIT",
+        "LUKITA_MAX_BODY_BYTES", "LUKITA_GEOIP_DB", "LUKITA_GEOIP_ASN_DB",
+        "ALLOW_PRIVATE_IPS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("LUKITA_API_TOKEN", TEST_TOKEN)
+    monkeypatch.setenv("LUKITA_ALLOWED_HOSTS", "testserver,127.0.0.1,localhost")
+    security.reset_settings()
+    for lim in (limits.scans, limits.nmap, limits.screenshots, limits.audits, limits.ssl_checks):
+        lim._in_use = 0
+    yield
+    security.reset_settings()
+
+
+@pytest.fixture
+def allow_private(monkeypatch):
+    """Allow internal targets (needed to point the API at 127.0.0.1)."""
+    monkeypatch.setenv("ALLOW_PRIVATE_IPS", "true")
+
+
+def _make_client(monkeypatch, headers):
     from fastapi.testclient import TestClient
 
     monkeypatch.setitem(sys.modules, "playwright.async_api", None)
     import main
 
-    with TestClient(main.app) as client:
+    return TestClient(main.app, headers=headers)
+
+
+@pytest.fixture
+def app_client(monkeypatch):
+    """
+    Authenticated FastAPI TestClient (Bearer token) with the full lifespan.
+
+    Playwright is made unimportable so no Chromium is launched; the lifespan
+    must degrade gracefully in that case.
+    """
+    with _make_client(monkeypatch, {"Authorization": f"Bearer {TEST_TOKEN}"}) as client:
+        yield client
+
+
+@pytest.fixture
+def anon_client(monkeypatch):
+    """TestClient without credentials."""
+    with _make_client(monkeypatch, {}) as client:
         yield client

@@ -101,6 +101,7 @@ def _verify_chain(
     port: int,
     timeout: float,
     cafile: Optional[str] = None,
+    connect_host: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """
     Perform a second handshake with full certificate verification.
@@ -116,7 +117,7 @@ def _verify_chain(
     except ValueError:
         pass
     try:
-        with socket.create_connection((hostname, port), timeout=timeout) as raw:
+        with socket.create_connection((connect_host or hostname, port), timeout=timeout) as raw:
             with ctx.wrap_socket(raw, server_hostname=hostname):
                 return True, None
     except ssl.SSLCertVerificationError as exc:
@@ -138,7 +139,12 @@ def _detect_weak_ciphers(cipher_name: str) -> list[str]:
     ]
 
 
-def _probe_tls_versions(hostname: str, port: int, timeout: float) -> list[str]:
+def _probe_tls_versions(
+    hostname: str,
+    port: int,
+    timeout: float,
+    connect_host: Optional[str] = None,
+) -> list[str]:
     """
     Probe which TLS versions the server will accept.
 
@@ -157,7 +163,7 @@ def _probe_tls_versions(hostname: str, port: int, timeout: float) -> list[str]:
         if hasattr(ssl, "TLSVersion"):
             ctx.minimum_version = ssl.TLSVersion.TLSv1_3  # type: ignore[attr-defined]
             ctx.maximum_version = ssl.TLSVersion.TLSv1_3  # type: ignore[attr-defined]
-        with socket.create_connection((hostname, port), timeout=timeout) as raw:
+        with socket.create_connection((connect_host or hostname, port), timeout=timeout) as raw:
             with ctx.wrap_socket(raw, server_hostname=hostname) as tls:
                 if tls.version() in ("TLSv1.3",):
                     accepted.append("TLSv1.3")
@@ -172,7 +178,7 @@ def _probe_tls_versions(hostname: str, port: int, timeout: float) -> list[str]:
         if hasattr(ssl, "TLSVersion"):
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # type: ignore[attr-defined]
             ctx.maximum_version = ssl.TLSVersion.TLSv1_2  # type: ignore[attr-defined]
-        with socket.create_connection((hostname, port), timeout=timeout) as raw:
+        with socket.create_connection((connect_host or hostname, port), timeout=timeout) as raw:
             with ctx.wrap_socket(raw, server_hostname=hostname) as tls:
                 if tls.version() in ("TLSv1.2",):
                     accepted.append("TLSv1.2")
@@ -194,7 +200,7 @@ def _probe_tls_versions(hostname: str, port: int, timeout: float) -> list[str]:
                 continue
             ctx.minimum_version = min_ver
             ctx.maximum_version = max_ver
-            with socket.create_connection((hostname, port), timeout=timeout) as raw:
+            with socket.create_connection((connect_host or hostname, port), timeout=timeout) as raw:
                 with ctx.wrap_socket(raw, server_hostname=hostname) as tls:
                     negotiated = tls.version() or ""
                     if ver_label in negotiated:
@@ -260,12 +266,17 @@ def analyze_ssl(
     port: int = 443,
     timeout: float = 8.0,
     cafile: Optional[str] = None,
+    connect_host: Optional[str] = None,
 ) -> dict:
     """
     Perform a comprehensive TLS analysis of ``hostname:port``.
 
     This function is **synchronous** (blocking I/O).  The caller must run it
     in an executor to avoid blocking the asyncio event loop.
+
+    ``connect_host`` is the SSRF-validated IP to connect to; ``hostname`` is
+    then only used for SNI and certificate matching, so DNS is not consulted
+    again (anti-rebinding).  Defaults to ``hostname``.
 
     ``valid`` means a certificate was retrieved and parsed; ``trusted``
     reports whether it also validates against the trust store (``cafile``
@@ -309,7 +320,7 @@ def analyze_ssl(
     ctx.verify_mode    = ssl.CERT_NONE
 
     try:
-        with socket.create_connection((hostname, port), timeout=timeout) as raw_sock:
+        with socket.create_connection((connect_host or hostname, port), timeout=timeout) as raw_sock:
             with ctx.wrap_socket(raw_sock, server_hostname=hostname) as tls_sock:
                 der          = tls_sock.getpeercert(binary_form=True)
                 cipher_tuple = tls_sock.cipher()
@@ -383,7 +394,7 @@ def analyze_ssl(
         result["issues"].append("Self-signed certificate")
 
     # ── Chain / hostname verification ─────────────────────────────────────────
-    trusted, reason = _verify_chain(hostname, port, timeout, cafile)
+    trusted, reason = _verify_chain(hostname, port, timeout, cafile, connect_host)
     result["trusted"]      = trusted
     result["verify_error"] = reason
     # Self-signed and expired certs are already reported above.
@@ -392,7 +403,7 @@ def analyze_ssl(
 
     # ── TLS version enumeration ───────────────────────────────────────────────
     try:
-        versions = _probe_tls_versions(hostname, port, min(timeout, 5.0))
+        versions = _probe_tls_versions(hostname, port, min(timeout, 5.0), connect_host)
         result["tls_versions_offered"] = versions
         deprecated_offered = [v for v in versions if v in DEPRECATED_PROTOCOLS]
         for dv in deprecated_offered:
@@ -421,6 +432,7 @@ def analyze_ssl_for_ports(
     hostname: str,
     open_ports: list[int],
     timeout: float = 8.0,
+    connect_host: Optional[str] = None,
 ) -> dict:
     """Analyze all HTTPS ports found in ``open_ports``."""
     target_ports = [p for p in (443, 8443) if p in open_ports]
@@ -428,7 +440,7 @@ def analyze_ssl_for_ports(
         return {"error": "No HTTPS ports detected", "results": {}}
     return {
         "results": {
-            str(port): analyze_ssl(hostname, port, timeout)
+            str(port): analyze_ssl(hostname, port, timeout, connect_host=connect_host)
             for port in target_ports
         }
     }

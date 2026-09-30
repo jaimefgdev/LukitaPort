@@ -9,7 +9,7 @@ typed responses.
 
 Responsibilities
 ────────────────
-• GeoIP enrichment
+• GeoIP enrichment (local GeoLite2 only, off by default)
 • Network discovery (ping sweep) with proper subprocess lifecycle
 • Subdomain enumeration via crt.sh
 • nmap fingerprinting with graceful CancelledError propagation
@@ -33,6 +33,9 @@ from typing import TYPE_CHECKING, Optional
 
 import httpx
 
+import geoip
+import limits
+import safe_http
 from cache import screenshot_cache
 from config import PORT_RISK
 from logging_config import get_logger
@@ -83,29 +86,15 @@ def clear_browser() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def fetch_geoip(ip: str) -> dict:
-    """Return GeoIP enrichment data for ``ip``.  Never raises."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                f"http://ip-api.com/json/{ip}",
-                params={
-                    "fields": "status,country,countryCode,regionName,city,isp,as,org,query"
-                },
-            )
-            data = resp.json()
-            if data.get("status") == "success":
-                return {
-                    "country":      data.get("country", ""),
-                    "country_code": data.get("countryCode", ""),
-                    "region":       data.get("regionName", ""),
-                    "city":         data.get("city", ""),
-                    "isp":          data.get("isp", ""),
-                    "asn":          data.get("as", ""),
-                    "org":          data.get("org", ""),
-                }
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("geoip_failed", ip=ip, error=str(exc))
-    return {}
+    """
+    Return GeoIP data for ``ip`` from the local GeoLite2 database, or ``{}``
+    when GeoIP is disabled (the default).  Never raises and never sends the
+    address to a third party — see geoip.py.
+    """
+    if not geoip.is_enabled():
+        return {}
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, geoip.lookup, ip)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -396,122 +385,205 @@ def nmap_timeout(port_count: int) -> int:
 # Playwright screenshot — shared browser instance
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def take_screenshot(target: str, port: int) -> None:
+# Chromium never talks to the network by itself: every request is intercepted
+# by ``_proxy_route`` and served through the SSRF-safe fetcher.  As a second
+# line of defence anything that escapes interception (e.g. WebSockets) is
+# sent to a dead proxy on 127.0.0.1:9 — ``<-loopback>`` removes Chromium's
+# implicit proxy bypass for localhost — and hostname resolution is disabled.
+BROWSER_ARGS: list[str] = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--proxy-server=http://127.0.0.1:9",
+    "--proxy-bypass-list=<-loopback>",
+    "--host-resolver-rules=MAP * ~NOTFOUND",
+]
+
+SCREENSHOT_MAX_REQUESTS      = 150              # per page
+SCREENSHOT_MAX_RESPONSE_SIZE = 5 * 1024 * 1024  # per sub-resource
+
+# Hop-by-hop / encoding headers that must not be forwarded.
+_DROP_REQUEST_HEADERS  = frozenset({
+    "host", "connection", "content-length", "accept-encoding",
+    "proxy-authorization", "proxy-connection", "keep-alive", "upgrade",
+    "transfer-encoding", "te",
+})
+_DROP_RESPONSE_HEADERS = frozenset({
+    "content-encoding", "content-length", "transfer-encoding", "connection",
+    "keep-alive",
+})
+
+
+def screenshot_url(host: str, port: int) -> str:
+    scheme = "https" if port in (443, 8443) else "http"
+    netloc = f"[{host}]" if ":" in host else host
+    return (
+        f"{scheme}://{netloc}"
+        if (scheme, port) in (("http", 80), ("https", 443))
+        else f"{scheme}://{netloc}:{port}"
+    )
+
+
+class _RouteProxy:
     """
-    Capture a full-browser screenshot of ``target:port`` and store it in the
-    TTL-LRU ``screenshot_cache``.
+    Playwright route handler that fetches every request with ``safe_http``.
+
+    ``pins`` holds the SSRF-validated target (hostname → IP); other hosts a
+    page references are resolved and validated on demand.  Blocked or failed
+    requests are aborted, so Chromium can never reach an internal address.
+    """
+
+    def __init__(self, client, pins: dict[str, str]) -> None:  # noqa: ANN001
+        self.client   = client
+        self.pins     = pins
+        self.requests = 0
+        self.blocked  = 0
+
+    async def __call__(self, route, request) -> None:  # noqa: ANN001
+        self.requests += 1
+        if self.requests > SCREENSHOT_MAX_REQUESTS:
+            await route.abort("blockedbyclient")
+            return
+        headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in _DROP_REQUEST_HEADERS
+        }
+        try:
+            resp = await safe_http.fetch(
+                self.client,
+                request.url,
+                method=request.method,
+                headers=headers,
+                content=request.post_data_buffer,
+                pinned=self.pins,
+                max_redirects=0,           # Chromium follows redirects via us
+                max_bytes=SCREENSHOT_MAX_RESPONSE_SIZE,
+                timeout=8.0,
+            )
+        except safe_http.BlockedDestination as exc:
+            self.blocked += 1
+            logger.warning("screenshot_request_blocked", url=request.url, reason=str(exc))
+            await route.abort("blockedbyclient")
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("screenshot_request_failed", url=request.url, error=str(exc))
+            await route.abort("failed")
+            return
+        await route.fulfill(
+            status=resp.status,
+            headers={
+                k: v for k, v in resp.headers.items()
+                if k.lower() not in _DROP_RESPONSE_HEADERS
+            },
+            body=resp.body,
+        )
+
+
+async def take_screenshot(hostname: str, ip: str, port: int) -> None:
+    """
+    Capture a screenshot of ``hostname:port`` and store it in the TTL-LRU
+    ``screenshot_cache`` (keyed by ``hostname``).
+
+    ``ip`` is the SSRF-validated address of ``hostname``; the page is loaded
+    through ``_RouteProxy`` pinned to it.
 
     Browser reuse
     ─────────────
-    When a shared ``Browser`` instance has been registered via ``set_browser``
-    (which main.py's lifespan does at startup), this function opens a fresh
-    ``BrowserContext`` per screenshot request instead of launching a new
-    Chromium process.  A context is lighter than a browser: it has its own
-    cookies/localStorage/network but shares the underlying Chromium renderer.
-    The context is always closed in the ``finally`` block to prevent leaks.
-
-    Fallback
-    ────────
-    If ``_browser`` is None (e.g. Playwright not installed, or called from
-    a test without a lifespan), the function falls back to launching a
-    short-lived browser instance — the old behaviour — so nothing breaks.
+    When a shared ``Browser`` has been registered via ``set_browser`` (the
+    lifespan does it at startup) a fresh ``BrowserContext`` is opened per
+    screenshot; otherwise a short-lived browser is launched (fallback).
     """
-    scheme = "https" if port in (443, 8443) else "http"
-    url    = (
-        f"{scheme}://{target}:{port}"
-        if port not in (80, 443)
-        else f"{scheme}://{target}"
-    )
+    url = screenshot_url(hostname, port)
+    logger.info("screenshot_start", target=hostname, port=port, url=url)
 
-    logger.info("screenshot_start", target=target, port=port, url=url)
-
-    # ── Path A: reuse shared browser (production path) ────────────────────────
-    if _browser is not None:
-        await _screenshot_with_shared_browser(target, url)
-        return
-
-    # ── Path B: launch a dedicated browser (fallback / test path) ────────────
-    await _screenshot_launch_browser(target, url)
-
-
-async def _screenshot_with_shared_browser(target: str, url: str) -> None:
-    """
-    Capture a screenshot using the pre-launched global ``_browser``.
-
-    Each call opens an isolated ``BrowserContext`` (separate cookies, cache,
-    TLS session) and closes it unconditionally in ``finally``.  This means
-    concurrent requests never interfere and the context is always freed.
-    """
-    context = None
     try:
-        context = await _browser.new_context(  # type: ignore[union-attr]
+        if _browser is not None:
+            await _capture(_browser, hostname, ip, url, mode="shared")
+            return
+        await _screenshot_launch_browser(hostname, ip, url)
+    finally:
+        limits.screenshots.release()
+
+
+async def _capture(browser, hostname: str, ip: str, url: str, mode: str) -> None:  # noqa: ANN001
+    context = None
+    client  = safe_http.make_client(timeout=8.0)
+    proxy   = _RouteProxy(client, {hostname: ip})
+    try:
+        context = await browser.new_context(
             viewport={"width": 1280, "height": 800},
             ignore_https_errors=True,
+            service_workers="block",       # SW fetches would bypass routing
+            accept_downloads=False,
         )
+        await context.route("**/*", proxy)
         page = await context.new_page()
         try:
             await asyncio.wait_for(
                 page.goto(url, wait_until="domcontentloaded"),
-                timeout=8.0,
+                timeout=10.0,
             )
             png = await page.screenshot(full_page=False)
-            screenshot_cache.set(target, {"png": png, "url": url, "ts": time.time()})
-            logger.info("screenshot_done", target=target, bytes=len(png), mode="shared")
+            screenshot_cache.set(hostname, {"png": png, "url": url, "ts": time.time()})
+            logger.info(
+                "screenshot_done", target=hostname, bytes=len(png), mode=mode,
+                requests=proxy.requests, blocked=proxy.blocked,
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("screenshot_page_error", target=target, url=url, error=str(exc))
+            logger.warning("screenshot_page_error", target=hostname, url=url, error=str(exc))
     except Exception as exc:  # noqa: BLE001
-        logger.error("screenshot_context_error", target=target, error=str(exc))
+        logger.error("screenshot_context_error", target=hostname, error=str(exc))
     finally:
         if context is not None:
             try:
                 await context.close()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("screenshot_context_close_error", error=str(exc))
+        await client.aclose()
 
 
-async def _screenshot_launch_browser(target: str, url: str) -> None:
+async def _screenshot_launch_browser(hostname: str, ip: str, url: str) -> None:
     """
     Fallback: launch a fresh Chromium instance, capture one screenshot, close.
 
-    Used when ``_browser`` is None (Playwright not installed, or unit tests
-    that skip the lifespan).
+    Used when no shared browser is registered (Playwright missing at startup,
+    or unit tests that skip the lifespan).
     """
     try:
         from playwright.async_api import async_playwright  # type: ignore[import]
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
-            )
+            browser = await pw.chromium.launch(headless=True, args=BROWSER_ARGS)
             try:
-                context = await browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    ignore_https_errors=True,
-                )
-                page = await context.new_page()
-                try:
-                    await asyncio.wait_for(
-                        page.goto(url, wait_until="domcontentloaded"),
-                        timeout=8.0,
-                    )
-                    png = await page.screenshot(full_page=False)
-                    screenshot_cache.set(target, {"png": png, "url": url, "ts": time.time()})
-                    logger.info("screenshot_done", target=target, bytes=len(png), mode="fallback")
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("screenshot_page_error", target=target, error=str(exc))
-                finally:
-                    await context.close()
+                await _capture(browser, hostname, ip, url, mode="fallback")
             finally:
                 await browser.close()
     except ImportError:
         logger.warning("playwright_not_installed")
     except Exception as exc:  # noqa: BLE001
-        logger.error("screenshot_error", target=target, error=str(exc))
+        logger.error("screenshot_error", target=hostname, error=str(exc))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Markdown report generation
 # ──────────────────────────────────────────────────────────────────────────────
+
+_MD_ESCAPES = str.maketrans({
+    "\\": "\\\\", "`": "\\`", "|": "\\|", "*": "\\*", "_": "\\_",
+    "[": "\\[", "]": "\\]", "<": "&lt;", ">": "&gt;",
+    "\r": " ", "\n": " ",
+})
+
+
+def _md(value) -> str:  # noqa: ANN001
+    """
+    Escape a value for inline Markdown / table cells.
+
+    Banners and headers come from the scanned host and the payload from the
+    client, so ``|`` would break tables, backticks/brackets would inject
+    formatting or links, and raw HTML would render in many viewers.
+    """
+    return ("" if value is None else str(value)).translate(_MD_ESCAPES)
+
 
 def build_markdown_report(
     meta:    dict,
@@ -528,21 +600,21 @@ def build_markdown_report(
         "# LukitaPort — Port Scan Report",
         "",
         f"> Generated: {ts}  ",
-        f"> **Target:** `{target_info.get('input', '—')}`  ",
-        f"> **IP:** `{target_info.get('ip', '—')}`  ",
+        f"> **Target:** {_md(target_info.get('input', '—'))}  ",
+        f"> **IP:** {_md(target_info.get('ip', '—'))}  ",
     ]
     if target_info.get("hostname"):
-        lines.append(f"> **Hostname:** `{target_info['hostname']}`  ")
+        lines.append(f"> **Hostname:** {_md(target_info['hostname'])}  ")
     lines += [
-        f"> **Mode:** {target_info.get('mode', '—')}  ",
-        f"> **Profile:** {target_info.get('profile', 'normal')}  ",
+        f"> **Mode:** {_md(target_info.get('mode', '—'))}  ",
+        f"> **Profile:** {_md(target_info.get('profile', 'normal'))}  ",
     ]
 
     geo = target_info.get("geo") or {}
     if geo:
         lines.append(
-            f"> **Location:** {geo.get('city', '')} {geo.get('country', '')} · "
-            f"{geo.get('isp', '')} · {geo.get('asn', '')}  "
+            f"> **Location:** {_md(geo.get('city', ''))} {_md(geo.get('country', ''))} · "
+            f"{_md(geo.get('isp', ''))} · {_md(geo.get('asn', ''))}  "
         )
     lines += [
         "> **For educational use only.**",
@@ -553,8 +625,8 @@ def build_markdown_report(
         "",
         "| Open | Closed | Filtered | Total Scanned |",
         "|------|--------|----------|---------------|",
-        f"| {summary.get('open', 0)} | {summary.get('closed', 0)} | "
-        f"{summary.get('filtered', 0)} | {summary.get('total', 0)} |",
+        f"| {_md(summary.get('open', 0))} | {_md(summary.get('closed', 0))} | "
+        f"{_md(summary.get('filtered', 0))} | {_md(summary.get('total', 0))} |",
         "",
     ]
 
@@ -572,7 +644,9 @@ def build_markdown_report(
             risk    = PORT_RISK.get(port, "info").upper()
             resp    = r.get("response_time_ms", "—")
             version = r.get("version") or r.get("banner") or ""
-            lines.append(f"| {port} | {service} | {risk} | {resp} | {str(version)[:60]} |")
+            lines.append(
+                f"| {_md(port)} | {_md(service)} | {risk} | {_md(resp)} | {_md(str(version)[:60])} |"
+            )
         lines.append("")
 
     high_n = sum(1 for r in open_ports if PORT_RISK.get(r.get("port"), "info") == "high")
@@ -598,7 +672,9 @@ def build_markdown_report(
         risk  = PORT_RISK.get(port, "info").upper() if state == "open" else "—"
         resp  = r.get("response_time_ms", "—")
         icon  = "🟢" if state == "open" else "🟡" if state == "filtered" else "🔴"
-        lines.append(f"| {port} | {icon} {state.capitalize()} | {svc} | {risk} | {resp} |")
+        lines.append(
+            f"| {_md(port)} | {icon} {_md(str(state).capitalize())} | {_md(svc)} | {risk} | {_md(resp)} |"
+        )
     lines.append("")
 
     if audit:
@@ -606,38 +682,40 @@ def build_markdown_report(
         hd = audit.get("headers")
         if hd and not hd.get("error"):
             lines.append(
-                f"### HTTP Security Headers — Grade: {hd.get('grade', '?')} "
-                f"({hd.get('score', 0)}/100)"
+                f"### HTTP Security Headers — Grade: {_md(hd.get('grade', '?'))} "
+                f"({_md(hd.get('score', 0))}/100)"
             )
             lines.append("")
             for h in hd.get("missing", []):
                 lines.append(
-                    f"- `{h['header']}` (**{h['severity'].upper()}**) "
-                    f"— {h.get('description_en', '')}"
+                    f"- {_md(h['header'])} (**{_md(str(h['severity']).upper())}**) "
+                    f"— {_md(h.get('description_en', ''))}"
                 )
             lines.append("")
 
         td = audit.get("technologies")
         if td and not td.get("error") and td.get("technologies"):
-            lines.append(f"### Detected Technologies ({td['count']})")
+            lines.append(f"### Detected Technologies ({_md(td.get('count', 0))})")
             lines.append("")
             for tech in td["technologies"]:
-                lines.append(f"- {tech['icon']} **{tech['name']}** ({tech['category']})")
+                lines.append(
+                    f"- {_md(tech['icon'])} **{_md(tech['name'])}** ({_md(tech['category'])})"
+                )
             lines.append("")
 
         pd = audit.get("paths")
         if pd and pd.get("found"):
-            lines.append(f"### Sensitive Paths ({pd['total_found']} found)")
+            lines.append(f"### Sensitive Paths ({_md(pd.get('total_found', 0))} found)")
             lines += [
                 "",
                 "| Path | Label | Severity | Status |",
                 "|------|-------|----------|--------|",
             ]
             for f in pd["found"]:
-                accessible = "✅ Accessible" if f["accessible"] else f"⚠️ {f['status_code']}"
+                accessible = "✅ Accessible" if f["accessible"] else f"⚠️ {_md(f['status_code'])}"
                 lines.append(
-                    f"| `{f['path']}` | {f['label']} | "
-                    f"**{f['severity'].upper()}** | {accessible} |"
+                    f"| {_md(f['path'])} | {_md(f['label'])} | "
+                    f"**{_md(str(f['severity']).upper())}** | {accessible} |"
                 )
             lines.append("")
 
