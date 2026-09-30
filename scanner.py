@@ -31,8 +31,13 @@ import asyncio
 import errno
 import random
 import socket
-from typing import Optional
+import sys
 from collections.abc import AsyncGenerator
+from typing import Optional
+
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 COMMON_PORTS = [
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445,
@@ -80,6 +85,8 @@ _REFUSED_ERRNOS = frozenset(
     e for e in (
         getattr(errno, "ECONNREFUSED", None),
         getattr(errno, "ECONNRESET", None),
+        getattr(errno, "WSAECONNREFUSED", None),    # Windows socket errors
+        getattr(errno, "WSAECONNRESET", None),
     ) if e is not None
 )
 # errno values meaning *we* ran out of resources.
@@ -89,10 +96,14 @@ _RESOURCE_ERRNOS = frozenset(
         getattr(errno, "ENFILE", None),
         getattr(errno, "ENOBUFS", None),
         getattr(errno, "EADDRNOTAVAIL", None),  # ephemeral ports exhausted
+        getattr(errno, "WSAEMFILE", None),      # Windows socket errors
+        getattr(errno, "WSAENOBUFS", None),
+        getattr(errno, "WSAEADDRNOTAVAIL", None),
     ) if e is not None
 )
 
 _RESOURCE_RETRIES = 5
+_IS_WINDOWS       = sys.platform == "win32"
 _FD_RESERVE       = 128      # descriptors kept free for the rest of the app
 
 
@@ -174,6 +185,92 @@ async def _grab_banner(
         return None
 
 
+# ── Windows: closed ports must fail fast ───────────────────────────────────────
+# When a SYN is answered with RST, Windows does not report "connection
+# refused" straight away: it retransmits the SYN (2 more times, ~2 s in
+# total) first.  With a 1 s timeout every closed port would then look
+# "filtered".  SIO_TCP_INITIAL_RTO with MaxSynRetransmissions =
+# TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS (Windows 10 1703+) disables those
+# retransmissions for the socket: RST → WSAECONNREFUSED immediately, and the
+# single SYN waits `timeout` (Rtt) for an answer.
+
+SIO_TCP_INITIAL_RTO                    = 0x98000011   # _WSAIOW(IOC_VENDOR, 17)
+TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS = 0xFE         # (UCHAR) -2
+_RTT_MAX_MS                            = 0xFFFE       # 0xFFFF = "unspecified"
+
+# Used only when the ioctl is unavailable (old Windows): wait long enough for
+# Windows' own SYN retransmissions to end in "refused" before calling a port
+# filtered.
+WINDOWS_REFUSAL_GRACE = 2.5
+
+_initial_rto_supported: Optional[bool] = None
+
+
+def _windows_ioctl(sock: socket.socket, code: int, payload: bytes) -> None:
+    """WSAIoctl(sock, code, payload) via ctypes (socket.ioctl only knows 3 codes)."""
+    import ctypes
+    from ctypes import wintypes
+
+    ws2 = ctypes.WinDLL("ws2_32", use_last_error=True)  # type: ignore[attr-defined]
+    buf = ctypes.create_string_buffer(payload, len(payload))
+    returned = wintypes.DWORD(0)
+    rc = ws2.WSAIoctl(
+        ctypes.c_size_t(sock.fileno()), wintypes.DWORD(code),
+        buf, wintypes.DWORD(len(payload)), None, wintypes.DWORD(0),
+        ctypes.byref(returned), None, None,
+    )
+    if rc != 0:
+        raise OSError(ctypes.get_last_error(), "WSAIoctl(SIO_TCP_INITIAL_RTO) failed")  # type: ignore[attr-defined]
+
+
+def initial_rto_payload(timeout: float) -> bytes:
+    """TCP_INITIAL_RTO_PARAMETERS {USHORT Rtt; UCHAR MaxSynRetransmissions}."""
+    import struct
+    rtt_ms = max(1, min(int(timeout * 1000), _RTT_MAX_MS))
+    return struct.pack("<HBx", rtt_ms, TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS)
+
+
+def _disable_syn_retransmissions(sock: socket.socket, timeout: float) -> bool:
+    """Apply SIO_TCP_INITIAL_RTO; False (once logged) if Windows lacks it."""
+    global _initial_rto_supported
+    if _initial_rto_supported is False:
+        return False
+    try:
+        _windows_ioctl(sock, SIO_TCP_INITIAL_RTO, initial_rto_payload(timeout))
+    except (OSError, AttributeError) as exc:
+        _initial_rto_supported = False
+        logger.warning(
+            "windows_initial_rto_unavailable", error=str(exc),
+            detail=f"closed ports will take up to {WINDOWS_REFUSAL_GRACE}s to be classified",
+        )
+        return False
+    _initial_rto_supported = True
+    return True
+
+
+async def _open_connection(
+    ip: str, port: int, timeout: float,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """
+    Connect to ``ip:port`` within ``timeout`` seconds using a socket we
+    create ourselves, so platform-specific options can be applied first.
+    """
+    loop   = asyncio.get_running_loop()
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    sock   = socket.socket(family, socket.SOCK_STREAM)      # EMFILE → resource error
+    try:
+        sock.setblocking(False)
+        wait = timeout
+        if _IS_WINDOWS and not _disable_syn_retransmissions(sock, timeout):
+            wait = max(timeout, WINDOWS_REFUSAL_GRACE)
+        address = (ip, port, 0, 0) if family == socket.AF_INET6 else (ip, port)
+        await asyncio.wait_for(loop.sock_connect(sock, address), timeout=wait)
+        return await asyncio.open_connection(sock=sock)
+    except BaseException:
+        sock.close()
+        raise
+
+
 async def _scan_port_async(ip: str, port: int, timeout: float) -> dict:
     """
     Probe one port.  Raises ``OSError`` only for local resource errors
@@ -191,7 +288,7 @@ async def _scan_port_async(ip: str, port: int, timeout: float) -> dict:
         return round((loop.time() - start) * 1000, 2)
 
     try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
+        reader, writer = await _open_connection(ip, port, timeout)
     except TimeoutError:
         result["state"] = "filtered"
         result["response_time_ms"] = elapsed_ms()

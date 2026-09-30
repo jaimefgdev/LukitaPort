@@ -20,6 +20,7 @@
 // Measured overhead vs synchronous: < 30 ms total for JSON, < 50 ms for HTML.
 
 import { csvField } from './utils.js';
+import { apiFetch } from './http.js';
 import { state, getRisk }  from './state.js';
 import { $, showToast }    from './ui.js';
 import { tmplHTMLReport }  from './templates.js';
@@ -186,12 +187,11 @@ export async function exportPDF() {
             screenshot_target: state.scanMeta?.hostname || state.scanMeta?.ip || null,
         };
 
-        const resp = await fetch('/api/export/pdf', {
+        const resp = await apiFetch('/api/export/pdf', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify(body),
         });
-        if (!resp.ok) throw new Error('Server error');
 
         const blob = await resp.blob();
         const url  = URL.createObjectURL(blob);
@@ -202,7 +202,7 @@ export async function exportPDF() {
         URL.revokeObjectURL(url);
         showToast('PDF generado ✓', 'ok');
     } catch (e) {
-        showToast((state.lang === 'es' ? 'Error generando PDF: ' : 'PDF error: ') + e.message, 'error');
+        showToast((state.lang === 'es' ? 'Error generando PDF: ' : 'PDF error: ') + e.message, 'error', 6000);
     } finally {
         restore();
     }
@@ -232,17 +232,16 @@ export async function exportMarkdown() {
             audit: state.auditData || null,
         };
 
-        const resp = await fetch('/api/export/md', {
+        const resp = await apiFetch('/api/export/md', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify(body),
         });
-        if (!resp.ok) throw new Error('Server error');
 
         dl(await resp.text(), `lukitaport_report_${getSlug()}_${getTs()}.md`, 'text/markdown');
         showToast('Markdown exportado ✓', 'ok');
     } catch (e) {
-        showToast((state.lang === 'es' ? 'Error generando MD: ' : 'MD error: ') + e.message, 'error');
+        showToast((state.lang === 'es' ? 'Error generando MD: ' : 'MD error: ') + e.message, 'error', 6000);
     } finally {
         restore();
     }
