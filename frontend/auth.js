@@ -5,14 +5,17 @@
 // every later fetch() and EventSource is authenticated automatically and no
 // other website can use it.  The token itself is never stored by the page.
 //
-// Login sources, in order:
+// Login sources (decision logic in authflow.js):
 //   1. #token=… in the URL fragment (the login URL printed by the server).
-//      The fragment is never sent to the server and is removed from the
-//      address bar immediately.
-//   2. The sign-in dialog (#auth-overlay).
+//      It always replaces the current session — also when the fragment
+//      changes in an already open tab (hashchange), e.g. after a server
+//      restart printed a new URL.  The fragment is removed immediately.
+//   2. The sign-in dialog (#auth-overlay), also re-opened on any 401.
 
-import { $ } from './ui.js';
+import { $, showToast } from './ui.js';
 import { state } from './state.js';
+import { authenticate } from './authflow.js';
+import { setUnauthorizedHandler } from './http.js';
 
 async function login(token) {
     const resp = await fetch('/api/auth', {
@@ -23,31 +26,43 @@ async function login(token) {
     return resp.status === 204;
 }
 
+async function logout() {
+    await fetch('/api/auth/logout', { method: 'POST' });
+}
+
 async function isAuthenticated() {
-    try {
-        const resp = await fetch('/api/auth/status');
-        return resp.ok && (await resp.json()).authenticated === true;
-    } catch {
-        return false;
-    }
+    const resp = await fetch('/api/auth/status');
+    return resp.ok && (await resp.json()).authenticated === true;
 }
 
-function tokenFromFragment() {
-    const params = new URLSearchParams(location.hash.slice(1));
-    const token  = params.get('token');
-    if (token) history.replaceState(null, '', location.pathname + location.search);
-    return token;
+function clearHash() {
+    history.replaceState(null, '', location.pathname + location.search);
 }
 
-function promptForToken() {
+const REASONS = {
+    invalid_fragment: {
+        es: 'El token de la URL no es válido (¿el servidor se reinició con otro token?). Introduce el token actual.',
+        en: 'The token in the URL is not valid (did the server restart with a new token?). Enter the current token.',
+    },
+    expired: {
+        es: 'Tu sesión ya no es válida. Introduce el token de acceso.',
+        en: 'Your session is no longer valid. Enter the access token.',
+    },
+};
+
+let _prompting = null;      // single pending dialog shared by all callers
+
+function promptForToken(reason) {
     const overlay = $('auth-overlay');
     const form    = $('auth-form');
     const input   = $('auth-token');
     const errorEl = $('auth-error');
+    errorEl.textContent = reason && REASONS[reason] ? REASONS[reason][state.lang] : '';
     overlay.classList.remove('hidden');
     input.focus();
 
-    return new Promise(resolve => {
+    if (_prompting) return _prompting;
+    _prompting = new Promise(resolve => {
         form.addEventListener('submit', async function onSubmit(e) {
             e.preventDefault();
             errorEl.textContent = '';
@@ -57,6 +72,7 @@ function promptForToken() {
                 input.value = '';
                 overlay.classList.add('hidden');
                 form.removeEventListener('submit', onSubmit);
+                _prompting = null;
                 resolve();
             } else {
                 errorEl.textContent = state.lang === 'es' ? 'Token no válido' : 'Invalid token';
@@ -64,12 +80,36 @@ function promptForToken() {
             }
         });
     });
+    return _prompting;
+}
+
+function hideOverlay() {
+    $('auth-overlay').classList.add('hidden');
+}
+
+async function run() {
+    const how = await authenticate({
+        hash: location.hash,
+        clearHash, login, logout, isAuthenticated,
+        prompt: promptForToken,
+    });
+    if (how === 'fragment') hideOverlay();
+    return how;
 }
 
 /** Resolve once the browser holds a valid session cookie. */
 export async function ensureAuthenticated() {
-    const fragmentToken = tokenFromFragment();
-    if (fragmentToken && await login(fragmentToken).catch(() => false)) return;
-    if (await isAuthenticated()) return;
-    await promptForToken();
+    // A new login URL opened in this tab only changes the fragment (no reload).
+    window.addEventListener('hashchange', async () => {
+        if (!location.hash.includes('token=')) return;
+        const how = await run();
+        if (how === 'fragment') {
+            showToast(state.lang === 'es'
+                ? 'Sesión iniciada con el token de la URL.'
+                : 'Signed in with the token from the URL.', 'ok');
+        }
+    });
+    // Any 401 from the API re-opens the dialog.
+    setUnauthorizedHandler(() => { promptForToken('expired'); });
+    await run();
 }

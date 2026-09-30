@@ -74,7 +74,9 @@ def test_slow_profile_is_accepted(app_client, allow_private, monkeypatch):
 
 
 def test_unknown_profile_is_rejected(app_client):
-    assert app_client.get("/api/scan", params={"target": "127.0.0.1", "profile": "anon"}).status_code == 422
+    events = _events(app_client, target="127.0.0.1", profile="anon")
+    assert len(events) == 1
+    assert events[0]["status"] == 422 and "profile" in events[0]["error"]
 
 
 def test_resource_error_is_reported(app_client, allow_private, monkeypatch):
@@ -101,3 +103,18 @@ def test_scanner_generator_is_closed_when_stream_ends(app_client, allow_private,
     monkeypatch.setattr(main, "scan_ports_stream", tracked)
     _events(app_client, target="127.0.0.1")
     assert closed == [True]
+
+
+def test_scan_validation_errors_arrive_as_sse_event(app_client):
+    # EventSource cannot read a 422 body, so the scan stream must report
+    # invalid parameters as an event the UI can show.
+    resp = app_client.get("/api/scan", params={"target": "127.0.0.1", "timeout": 99})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    event = json.loads(resp.text.strip().removeprefix("data: "))
+    assert event["status"] == 422 and "timeout" in event["error"]
+
+
+def test_other_endpoints_keep_json_validation_errors(app_client):
+    resp = app_client.get("/api/resolve", params={"target": "bad host"})
+    assert resp.status_code == 422 and resp.json()["error"] == "validation_error"
