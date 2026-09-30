@@ -41,23 +41,22 @@ import hashlib
 import hmac
 import ipaddress
 import json
-import os
 import secrets
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Optional
 
+import settings as app_settings
 from logging_config import get_logger
 
 logger = get_logger(__name__)
 
 SESSION_COOKIE   = "lukita_session"
 MIN_TOKEN_LENGTH = 16
-_TRUE            = ("1", "true", "yes", "on")
 
 # Paths under /api/ reachable without credentials.
-_AUTH_EXEMPT = frozenset({"/api/auth", "/api/auth/status"})
+_AUTH_EXEMPT = frozenset({"/api/auth", "/api/auth/status", "/api/health"})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -77,7 +76,7 @@ def is_loopback_host(host: Optional[str]) -> bool:
         return False
 
 
-class ConfigurationError(RuntimeError):
+class ConfigurationError(app_settings.SettingsError):
     """Raised when the security configuration is unsafe or invalid."""
 
 
@@ -109,23 +108,16 @@ class SecuritySettings:
         return hmac.compare_digest(cookie.encode(), self._session_value.encode())
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ConfigurationError(f"{name} must be an integer, got {raw!r}") from exc
-    if value < 1:
-        raise ConfigurationError(f"{name} must be ≥ 1")
-    return value
-
-
 def load_settings() -> SecuritySettings:
-    """Build settings from the environment; raise ConfigurationError if unsafe."""
-    bind_host = os.getenv("LUKITA_HOST", "127.0.0.1").strip() or "127.0.0.1"
-    env_token = os.getenv("LUKITA_API_TOKEN", "").strip()
+    """Build security settings from ``settings.Settings``; raise
+    ConfigurationError if the configuration is invalid or unsafe."""
+    try:
+        cfg = app_settings.get_settings()
+    except app_settings.SettingsError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+    bind_host = cfg.host or "127.0.0.1"
+    env_token = cfg.api_token
 
     if env_token:
         if len(env_token) < MIN_TOKEN_LENGTH:
@@ -141,11 +133,10 @@ def load_settings() -> SecuritySettings:
             )
         token, from_env = secrets.token_urlsafe(32), False
 
-    hosts_raw = os.getenv("LUKITA_ALLOWED_HOSTS", "")
-    allowed = {h.strip().lower().strip("[]") for h in hosts_raw.split(",") if h.strip()}
+    allowed = {h.strip().lower().strip("[]") for h in cfg.allowed_hosts.split(",") if h.strip()}
     if not allowed:
         allowed = {"127.0.0.1", "localhost", "::1"}
-        if bind_host not in ("0.0.0.0", "::"):
+        if bind_host not in ("0.0.0.0", "::"):  # noqa: S104 — a comparison, not a bind
             allowed.add(bind_host.lower().strip("[]"))
 
     return SecuritySettings(
@@ -153,9 +144,9 @@ def load_settings() -> SecuritySettings:
         token_from_env=from_env,
         bind_host=bind_host,
         allowed_hosts=frozenset(allowed),
-        enable_admin=os.getenv("LUKITA_ENABLE_ADMIN", "false").strip().lower() in _TRUE,
-        rate_limit=_env_int("LUKITA_RATE_LIMIT", 120),
-        max_body_bytes=_env_int("LUKITA_MAX_BODY_BYTES", 5 * 1024 * 1024),
+        enable_admin=cfg.enable_admin,
+        rate_limit=cfg.rate_limit,
+        max_body_bytes=cfg.max_body_bytes,
     )
 
 
@@ -173,6 +164,7 @@ def reset_settings() -> None:
     """Forget cached settings (tests, or after changing the environment)."""
     global _settings
     _settings = None
+    app_settings.reset_settings()
     _rate_limiter.reset()
 
 
@@ -234,7 +226,7 @@ def is_authenticated(headers: dict[str, str], settings: SecuritySettings) -> boo
     if auth.lower().startswith("bearer ") and settings.token_matches(auth[7:].strip()):
         return True
     cookie = _cookie(headers, SESSION_COOKIE)
-    return bool(cookie) and settings.session_matches(cookie)
+    return cookie is not None and settings.session_matches(cookie)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -284,10 +276,10 @@ class SecurityMiddleware:
     8. Security headers on every response
     """
 
-    def __init__(self, app) -> None:  # noqa: ANN001
+    def __init__(self, app) -> None:
         self.app = app
 
-    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+    async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -297,7 +289,7 @@ class SecurityMiddleware:
         path     = scope.get("path", "")
         method   = scope.get("method", "GET").upper()
 
-        async def send_with_headers(message) -> None:  # noqa: ANN001
+        async def send_with_headers(message) -> None:
             if message["type"] == "http.response.start":
                 existing = {k.lower() for k, _ in message.get("headers", [])}
                 message.setdefault("headers", [])
@@ -392,7 +384,7 @@ class SecurityMiddleware:
                     return {"type": "http.disconnect"}
             return message
 
-        async def tracking_send(message) -> None:  # noqa: ANN001
+        async def tracking_send(message) -> None:
             nonlocal response_started
             if rejected:
                 return
@@ -406,7 +398,7 @@ class SecurityMiddleware:
 def login_url(settings: SecuritySettings, port: int) -> str:
     """URL that logs the browser in; the token travels in the fragment only."""
     host = settings.bind_host
-    if host in ("0.0.0.0", "::"):
+    if host in ("0.0.0.0", "::"):  # noqa: S104 — a comparison, not a bind
         host = "127.0.0.1"
     if ":" in host:
         host = f"[{host}]"

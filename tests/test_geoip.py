@@ -38,11 +38,10 @@ class FakeReader:
         return self.data.get(ip)
 
 
-def test_local_lookup(monkeypatch, tmp_path):
+def test_local_lookup(monkeypatch, tmp_path, setenv):
     city = tmp_path / "GeoLite2-City.mmdb"
     asn = tmp_path / "GeoLite2-ASN.mmdb"
-    monkeypatch.setenv("LUKITA_GEOIP_DB", str(city))
-    monkeypatch.setenv("LUKITA_GEOIP_ASN_DB", str(asn))
+    setenv(LUKITA_GEOIP_DB=str(city), LUKITA_GEOIP_ASN_DB=str(asn))
     readers = {
         str(city): FakeReader({"8.8.8.8": {
             "country": {"iso_code": "US", "names": {"en": "United States"}},
@@ -65,13 +64,13 @@ def test_local_lookup(monkeypatch, tmp_path):
     assert st["enabled"] and "GeoLite2-City.mmdb" in st["source"] and st["asn"]
 
 
-def test_broken_database_never_raises(monkeypatch):
-    monkeypatch.setenv("LUKITA_GEOIP_DB", "/nonexistent.mmdb")
+def test_broken_database_never_raises(setenv):
+    setenv(LUKITA_GEOIP_DB="/nonexistent.mmdb")
     assert geoip.lookup("8.8.8.8") == {}
 
 
-def test_enabled_endpoint(app_client, monkeypatch, resolved):
-    monkeypatch.setenv("LUKITA_GEOIP_DB", "/x.mmdb")
+def test_enabled_endpoint(app_client, monkeypatch, resolved, setenv):
+    setenv(LUKITA_GEOIP_DB="/x.mmdb")
     monkeypatch.setattr(geoip, "lookup", lambda ip: {"country": "Testland"})
     resp = app_client.get("/api/geoip", params={"target": "8.8.8.8"})
     assert resp.json() == {"ip": "8.8.8.8", "enabled": True, "country": "Testland"}

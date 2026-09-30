@@ -19,7 +19,7 @@ def test_candidate_base_urls(ports, expected):
 
 
 def test_ipv6_base_url():
-    assert auditor._choose_base_url("2001:db8::1", [8080]) == "http://[2001:db8::1]:8080"
+    assert auditor._candidate_base_urls("2001:db8::1", [8080]) == ["http://[2001:db8::1]:8080"]
 
 
 async def test_full_audit_on_non_default_port(monkeypatch, allow_private):

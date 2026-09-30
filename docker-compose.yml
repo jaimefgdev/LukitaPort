@@ -14,6 +14,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # false → no Playwright/Chromium (smaller image, screenshots disabled)
+        WITH_SCREENSHOTS: ${WITH_SCREENSHOTS:-true}
     container_name: lukitaport
 
     ports:
@@ -43,13 +46,7 @@ services:
 
     restart: unless-stopped
 
-    # The UI page is public (the API is not), so it works as a health check.
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+    # Health check: defined in the Dockerfile (GET /api/health).
 
     # volumes:
     #   - ./geoip:/geoip:ro      # GeoLite2 databases (optional)

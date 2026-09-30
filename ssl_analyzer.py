@@ -16,7 +16,7 @@ import ipaddress
 import ssl
 import socket
 import warnings
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Optional
 
 from cryptography import x509
@@ -119,7 +119,7 @@ def _verify_chain(
 
 
 def _days_until(dt: datetime) -> int:
-    return (dt - datetime.now(timezone.utc)).days
+    return (dt - datetime.now(UTC)).days
 
 
 def _detect_weak_ciphers(cipher_name: str) -> list[str]:
@@ -319,7 +319,7 @@ def analyze_ssl(
                 der          = tls_sock.getpeercert(binary_form=True)
                 cipher_tuple = tls_sock.cipher()
                 protocol     = tls_sock.version()
-    except socket.timeout:
+    except TimeoutError:
         result["error"] = "Connection timed out"
         return result
     except ssl.SSLError as exc:
@@ -406,7 +406,7 @@ def analyze_ssl(
             if msg not in result["issues"]:
                 result["issues"].append(msg)
                 result["deprecated_protocol"] = True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("tls_probe_failed", hostname=hostname, port=port, error=str(exc))
 
     # ── Grade ─────────────────────────────────────────────────────────────────

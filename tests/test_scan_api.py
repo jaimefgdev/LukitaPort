@@ -12,7 +12,7 @@ import scanner
 
 def _events(client, **params):
     with client.stream("GET", "/api/scan", params=params) as resp:
-        return [json.loads(l.removeprefix("data: ")) for l in resp.iter_lines() if l]
+        return [json.loads(line.removeprefix("data: ")) for line in resp.iter_lines() if line]
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ def test_inverted_custom_range_is_rejected(app_client, allow_private):
                      port_start=200, port_end=100)
     assert events == [{
         "error": "Invalid custom range: start port (200) is greater than end port (100).",
-        "status": 400,
+        "status": 422,
     }]
 
 

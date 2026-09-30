@@ -1,46 +1,40 @@
 """
 main.py
 ───────
-LukitaPort v2 — FastAPI application entry point.
+LukitaPort — FastAPI application entry point.
 
 Route handlers are intentionally thin:
-  1. Validate input (via helper functions).
-  2. Delegate to the service layer / module functions.
-  3. Return a typed JSON response.
+  1. Inputs are validated by the types in models.py (HTTP 422 on failure).
+  2. Work is delegated to the service modules.
+  3. JSON responses are typed with ``response_model``.
 
-All business logic lives in scan_service.py and the dedicated module files.
+Errors
+──────
+Every error response has the same shape (``models.ErrorResponse``)::
 
-Lifespan — what happens at startup / shutdown
-──────────────────────────────────────────────
-Startup:
-  1. Configure structured JSON logging.
-  2. Try to start a shared Playwright + Chromium instance.
-     If playwright is not installed the server still starts; screenshots
-     fall back to the per-request launch strategy in scan_service.py.
-  3. Register the browser with scan_service.set_browser() so every
-     take_screenshot call reuses the single Chromium process.
-  4. Start a background task that evicts expired screenshot-cache entries
-     every 5 minutes.
+    {"ok": false, "error": "<code>", "detail": "<message>"}
 
-Shutdown:
-  1. Cancel the eviction task.
-  2. Close the shared Playwright browser and stop the playwright instance,
-     preventing orphan Chromium processes after Uvicorn stops.
+Handlers raise ``ApiError(status, code, detail)``; the exception handlers
+below also map validation errors (422), unknown routes (404), busy limits
+(429) and unexpected exceptions (500, details only in the log) to it.
+
+Lifespan
+────────
+Startup: validate configuration (fail fast), configure logging, launch a
+shared Chromium if Playwright is available, start the screenshot-cache
+eviction task.  Shutdown: stop the task and close the browser.
 
 Access control
 ──────────────
 ``security.SecurityMiddleware`` requires the API token on every ``/api/``
-route, validates the Host header, adds security headers (CSP, …), rate-limits
-clients and caps request bodies.  See security.py for the threat model.
+route (except auth and health), validates the Host header, adds security
+headers (CSP, …), rate-limits clients and caps request bodies.
 
 SSRF protection
 ───────────────
-After every resolve_target() call, check whether *any* resolved address is
-internal/private.  If so, return HTTP 403 Forbidden.  The first address is
-pinned: every later connection for that request goes to that IP.
-
-The check is skipped when ``ALLOW_PRIVATE_IPS=true`` is set in the
-environment — useful for scanning internal lab networks.
+Every target is resolved once; if *any* address is internal the request gets
+HTTP 403 (unless ``ALLOW_PRIVATE_IPS=true``).  The first address is pinned
+and every later connection for that request goes to it.
 
 Resource limits
 ───────────────
@@ -51,91 +45,145 @@ fails fast with HTTP 429.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import itertools
 import json
-import os
+from collections.abc import AsyncGenerator
 from contextlib import aclosing, asynccontextmanager
-from typing import Annotated, AsyncGenerator, Optional
+from typing import Annotated, Any, Optional
 
 from fastapi import BackgroundTasks, FastAPI, Query, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import geoip as geoip_db   # (module; `geoip` is also an endpoint below)
 import limits
 import security
-from logging_config import configure_logging, get_logger
-from models import AuthRequest, CVEBatchRequest, ExportRequest, ScreenshotCaptureResponse
+import settings as app_settings
+from auditor import run_full_audit
 from cache import screenshot_cache
 from config import PORT_RISK
-from resolver import resolve_target, is_ssrf_blocked, network_ssrf_blocked
-from scanner import scan_ports_stream, get_port_range, PROFILES, ScanResourceError
-from auditor import run_full_audit
-from ssl_analyzer import analyze_ssl_for_ports
-from cve_lookup import lookup_cves, lookup_cves_for_ports, get_cache_stats
-from scan_service import (
-    fetch_geoip,
-    ping_sweep,
-    enumerate_subdomains,
-    run_nmap,
-    nmap_timeout,
-    take_screenshot,
-    build_markdown_report,
-    set_browser,
-    clear_browser,
-    BROWSER_ARGS,
+from cve_lookup import get_cache_stats, lookup_cves, lookup_cves_for_ports
+from logging_config import configure_logging, get_logger
+from models import (
+    AuditResponse,
+    AuthRequest,
+    AuthStatus,
+    CVEBatchRequest,
+    CVEBatchResponse,
+    CVELookupResponse,
+    DiscoverCidr,
+    DiscoverResponse,
+    DomainStr,
+    ErrorResponse,
+    ExportRequest,
+    FingerprintResponse,
+    GeoIPResponse,
+    HealthResponse,
+    ResolveResponse,
+    ScreenshotCaptureResponse,
+    SSLResponse,
+    SubdomainsResponse,
+    TargetStr,
+    parse_ports,
+    validate_target,
 )
+from resolver import is_ssrf_blocked, network_ssrf_blocked, resolve_target
+from scan_service import (
+    BROWSER_ARGS,
+    NMAP_TIMEOUT_BASE,
+    NMAP_TIMEOUT_PER_PORT,
+    build_markdown_report,
+    clear_browser,
+    enumerate_subdomains,
+    fetch_geoip,
+    nmap_timeout,
+    ping_sweep,
+    run_nmap,
+    screenshots_supported,
+    set_browser,
+    take_screenshot,
+)
+from scanner import PROFILES, ScanResourceError, get_port_range, scan_ports_stream
+from ssl_analyzer import analyze_ssl_for_ports
 
-import ipaddress
-import re as _re
+logger = get_logger(__name__)
 
 # Seconds between client-disconnect checks while streaming scan results.
 DISCONNECT_CHECK_INTERVAL = 0.5
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Errors
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ApiError(Exception):
+    """An error returned to the client in the common error format."""
+
+    def __init__(self, status: int, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.code   = code
+        self.detail = detail
+
+
+def _error_json(status: int, code: str, detail: str, **extra: Any) -> JSONResponse:
+    body = ErrorResponse(error=code, detail=detail, **extra)
+    return JSONResponse(body.model_dump(exclude_none=True), status_code=status)
+
+
+def _ssrf_detail(ip: str) -> str:
+    return (
+        f"Scanning internal addresses is not permitted (resolved: {ip}). "
+        "Set ALLOW_PRIVATE_IPS=true to enable scanning private networks."
+    )
+
+
+# Documented on every JSON endpoint (OpenAPI).
+_ERRORS: dict[int | str, dict[str, Any]] = {
+    code: {"model": ErrorResponse} for code in (400, 401, 403, 422, 429, 500)
+}
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Lifespan  (startup + shutdown)
 # ──────────────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Startup ───────────────────────────────────────────────────────────────
-    configure_logging(os.getenv("LOG_LEVEL", "INFO"))
-
-    # Fail fast on an unsafe/invalid security configuration.
-    settings = security.get_settings()
+    # Fail fast on an invalid or unsafe configuration.
+    cfg = app_settings.get_settings()
+    configure_logging(cfg.log_level)
+    sec = security.get_settings()
     logger.info(
         "lukitaport_starting",
-        allow_private_ips=os.getenv("ALLOW_PRIVATE_IPS", "false"),
-        token_source="env" if settings.token_from_env else "generated",
-        admin_enabled=settings.enable_admin,
+        allow_private_ips=cfg.allow_private_ips,
+        token_source="env" if sec.token_from_env else "generated",
+        admin_enabled=sec.enable_admin,
         geoip=geoip_db.status()["enabled"],
     )
-    if not settings.token_from_env:
+    if not sec.token_from_env:
         # Ephemeral token: show the operator how to log in.  The token is in
         # the URL fragment, which browsers never send to the server.
-        url = security.login_url(settings, int(os.getenv("LUKITA_PORT", "8000")))
+        url = security.login_url(sec, cfg.port)
         logger.warning("api_token_generated", login_url=url)
         print(f"\n  LukitaPort — open this URL to log in:\n  {url}\n", flush=True)
 
-    # ── Playwright shared browser ─────────────────────────────────────────────
-    _pw = None
-    _browser_instance = None
-
+    # ── Playwright shared browser (optional) ──────────────────────────────────
+    pw = None
+    browser = None
     try:
-        from playwright.async_api import async_playwright  # type: ignore[import]
-        _pw               = await async_playwright().start()
-        _browser_instance = await _pw.chromium.launch(
-            headless=True,
-            args=BROWSER_ARGS,
-        )
-        set_browser(_browser_instance)
+        from playwright.async_api import async_playwright
+        pw      = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, args=BROWSER_ARGS)
+        set_browser(browser)
         logger.info("playwright_ready", browser="chromium")
     except ImportError:
-        logger.warning(
-            "playwright_not_installed",
-            detail="Screenshots will fall back to per-request launch.",
-        )
-    except Exception as exc:  # noqa: BLE001
+        logger.warning("playwright_not_installed", detail="Screenshots are disabled.")
+    except Exception as exc:
         logger.error(
             "playwright_launch_failed",
             error=str(exc),
@@ -152,28 +200,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
 
     evict_task = asyncio.create_task(_evict_loop())
 
-    # ── Hand off to the application ───────────────────────────────────────────
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
     evict_task.cancel()
-
     clear_browser()
-
-    if _browser_instance is not None:
+    if browser is not None:
         try:
-            await _browser_instance.close()
+            await browser.close()
             logger.info("playwright_browser_closed")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("playwright_browser_close_error", error=str(exc))
-
-    if _pw is not None:
+    if pw is not None:
         try:
-            await _pw.stop()
+            await pw.stop()
             logger.info("playwright_stopped")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("playwright_stop_error", error=str(exc))
-
     logger.info("lukitaport_shutdown")
 
 
@@ -181,209 +224,107 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
 # FastAPI application
 # ──────────────────────────────────────────────────────────────────────────────
 
-logger = get_logger(__name__)
-
 app = FastAPI(
     title="LukitaPort",
-    version="2.0.0",
+    version="2.1.0",
     description=(
         "Async port scanner with real-time SSE streaming, HTTP security audit, "
-        "SSL/TLS analysis, CVE lookup, network discovery, and subdomain enumeration."
+        "SSL/TLS analysis, CVE lookup, network discovery, and subdomain enumeration. "
+        "For authorised, educational use only."
     ),
     lifespan=lifespan,
+    # Swagger UI / ReDoc load scripts from a CDN, which the CSP forbids; the
+    # schema itself stays available at /openapi.json.
+    docs_url=None,
+    redoc_url=None,
 )
 
 # No CORS: the UI is served from the same origin and no other site may call
 # the API.  SecurityMiddleware handles auth, Host checks, headers and limits.
 app.add_middleware(security.SecurityMiddleware)
-
-
-@app.exception_handler(limits.Busy)
-async def _busy_handler(request: Request, exc: limits.Busy) -> Response:  # noqa: ARG001
-    return _json_response({"ok": False, "error": "busy", "detail": str(exc)}, 429)
-
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
 
+@app.exception_handler(ApiError)
+async def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
+    return _error_json(exc.status, exc.code, exc.detail)
+
+
+@app.exception_handler(limits.Busy)
+async def _busy_handler(request: Request, exc: limits.Busy) -> JSONResponse:
+    return _error_json(429, "busy", str(exc))
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = [
+        {"loc": list(e.get("loc", ())), "msg": str(e.get("msg", "")), "type": e.get("type", "")}
+        for e in exc.errors()
+    ]
+    first_loc: list = errors[0]["loc"] if errors else []
+    first_msg: str  = errors[0]["msg"] if errors else "Invalid request"
+    where  = ".".join(str(p) for p in first_loc if p not in ("query", "body"))
+    detail = f"{where}: {first_msg}" if where else first_msg
+    return _error_json(422, "validation_error", detail, errors=errors)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    code = {404: "not_found", 405: "method_not_allowed"}.get(exc.status_code, "http_error")
+    return _error_json(exc.status_code, code, str(exc.detail))
+
+
+@app.exception_handler(Exception)
+async def _unexpected_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.error("unhandled_error", path=request.url.path, error=str(exc), exc_info=exc)
+    return _error_json(500, "internal_error", "Internal server error.")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Input validation helpers
+# Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-_HOSTNAME_RE     = _re.compile(
-    r"^(?!-)(?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)"
-    r"(?:\.(?!-)(?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)){0,126}$"
-)
-_DOMAIN_LABEL_RE = _re.compile(r"^[A-Za-z0-9\-]{1,63}$")
-
-
-def _json_response(data: dict, status_code: int = 200) -> Response:
-    return Response(
-        content=json.dumps(data),
-        status_code=status_code,
-        media_type="application/json",
-    )
-
-
-def _bad(msg: str, status_code: int = 400) -> Response:
-    return _json_response({"ok": False, "error": msg}, status_code)
-
-
-def _ssrf_error(ip: str) -> Response:
-    """
-    Return HTTP 403 when a resolved IP is in a private/internal range.
-
-    The body includes the offending IP so the client can show a helpful
-    message.  Blocked IPs are also logged (warning level) by resolver.py.
-    """
-    return _json_response(
-        {
-            "ok":    False,
-            "error": "ssrf_blocked",
-            "detail": (
-                f"Scanning internal addresses is not permitted (resolved: {ip}). "
-                "Set ALLOW_PRIVATE_IPS=true to enable scanning private networks."
-            ),
-        },
-        status_code=403,
-    )
-
-
-def _validate_target(target: str) -> tuple[Optional[str], Optional[Response]]:
-    t = target.strip()
-    if not t or len(t) > 253:
-        return None, _bad("Invalid target: empty or exceeds 253 characters.")
+def _ports(raw: str, max_ports: int) -> list[int]:
     try:
-        ipaddress.ip_address(t)
-        return t, None
-    except ValueError:
-        pass
-    if _HOSTNAME_RE.match(t) and "." in t:
-        return t, None
-    return None, _bad(f"Invalid target: '{t}' is not a valid IPv4, IPv6, or RFC 1123 hostname.")
-
-
-# Widest network /api/discover accepts: a /22 holds 1022 usable hosts, which
-# matches the upper bound of ``max_hosts``.  IPv6 sweeps are rejected
-# outright — even a /120 is pointless to ping-sweep and a /64 cannot be
-# enumerated at all.
-DISCOVER_MIN_IPV4_PREFIX = 22
-
-
-def _validate_cidr(
-    cidr: str,
-) -> tuple[Optional[ipaddress.IPv4Network], Optional[Response]]:
-    try:
-        network = ipaddress.ip_network(cidr.strip(), strict=False)
+        return parse_ports(raw, max_ports)
     except ValueError as exc:
-        return None, _bad(f"Invalid CIDR: {exc}")
-    if network.version != 4:
-        return None, _bad("Invalid CIDR: only IPv4 networks can be discovered.")
-    if network.prefixlen < DISCOVER_MIN_IPV4_PREFIX:
-        return None, _bad(
-            f"Invalid CIDR: network too large (/{network.prefixlen}); "
-            f"the widest allowed is /{DISCOVER_MIN_IPV4_PREFIX}."
-        )
-    return network, None
+        raise ApiError(422, "validation_error", f"ports: {exc}") from exc
 
 
-def _validate_domain(domain: str) -> tuple[Optional[str], Optional[Response]]:
-    d = domain.strip().lstrip("*.").lower()
-    if not d or len(d) > 253 or "." not in d:
-        return None, _bad("Invalid domain: must contain at least one dot.")
-    labels = d.split(".")
-    if not all(_DOMAIN_LABEL_RE.match(lbl) for lbl in labels):
-        return None, _bad(f"Invalid domain: '{d}' contains invalid characters.")
-    return d, None
-
-
-def _validate_ports_str(
-    ports: str, max_ports: int = limits.MAX_AUDIT_PORTS,
-) -> tuple[Optional[list[int]], Optional[Response]]:
-    result: list[int] = []
-    items = ports.split(",")
-    if len(items) > max_ports:
-        return None, _bad(f"Too many ports (max {max_ports}).")
-    for p in items:
-        p = p.strip()
-        if not p.isdigit():
-            return None, _bad(f"Invalid port value: '{p}'")
-        pint = int(p)
-        if not (1 <= pint <= 65_535):
-            return None, _bad(f"Port {pint} is out of range (1–65535).")
-        if pint not in result:
-            result.append(pint)
-    return result, None
-
-
-def _check_resolution(resolution: dict) -> Optional[Response]:
+async def _resolve_checked(target: str, reverse_dns: bool = False) -> dict:
     """
-    Check the result of ``resolve_target()``.
+    Resolve ``target`` and enforce the SSRF policy.
 
-    Returns an error Response (400 or 403) if:
-    • DNS resolution failed, or
-    • The resolved IP is an internal address and ALLOW_PRIVATE_IPS is false.
-
-    Returns None on success — the caller may proceed.
+    Raises ``ApiError`` 400 when it does not resolve and 403 when any of its
+    addresses is internal (and private addresses are not allowed).
     """
+    resolution = await resolve_target(target, reverse_dns=reverse_dns)
     if not resolution["ip"]:
-        return _bad(f"Could not resolve target: {resolution['error']}")
-
-    if resolution["error"] == "ssrf_blocked":
-        return _ssrf_error(resolution["ip"])
-
-    # Extra guard: re-check the IP directly (defence in depth for any code
-    # path that calls resolve_target without the ssrf_blocked sentinel).
-    if is_ssrf_blocked(resolution["ip"]):
-        return _ssrf_error(resolution["ip"])
-
-    return None
+        raise ApiError(400, "unresolvable", f"Could not resolve target: {resolution['error']}")
+    # Second check is defence in depth for the ssrf_blocked sentinel.
+    if resolution["error"] == "ssrf_blocked" or is_ssrf_blocked(resolution["ip"]):
+        raise ApiError(403, "ssrf_blocked", _ssrf_detail(resolution["ip"]))
+    return resolution
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Config / Root
+# Health / config / UI
 # ──────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/health", response_model=HealthResponse, include_in_schema=False)
+def health() -> dict:
+    """Liveness probe (no authentication, no details)."""
+    return {"ok": True}
+
 
 @app.get("/api/config", include_in_schema=False)
 def get_config() -> dict:
     return {
         "portRisk": {str(k): v for k, v in PORT_RISK.items()},
         "geoip":    geoip_db.status(),
+        "nmap":     {"timeoutBase": NMAP_TIMEOUT_BASE, "timeoutPerPort": NMAP_TIMEOUT_PER_PORT},
+        "limits":   {"cveBatch": limits.MAX_CVE_BATCH, "fingerprintPorts": limits.MAX_FINGERPRINT_PORTS},
     }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Authentication  (exempt from the token check, see security.py)
-# ──────────────────────────────────────────────────────────────────────────────
-
-@app.get("/api/auth/status", include_in_schema=False)
-def auth_status(request: Request) -> dict:
-    headers = {k.lower(): v for k, v in request.headers.items()}
-    return {"authenticated": security.is_authenticated(headers, security.get_settings())}
-
-
-@app.post("/api/auth", include_in_schema=False)
-def auth_login(payload: AuthRequest, request: Request) -> Response:
-    settings = security.get_settings()
-    if not settings.token_matches(payload.token):
-        logger.warning("auth_failed", client=request.client.host if request.client else None)
-        return _bad("Invalid token.", 401)
-    resp = Response(status_code=204)
-    resp.set_cookie(
-        security.SESSION_COOKIE,
-        settings.session_value(),
-        httponly=True,
-        samesite="strict",
-        secure=request.url.scheme == "https",
-        path="/",
-    )
-    return resp
-
-
-@app.post("/api/auth/logout", include_in_schema=False)
-def auth_logout() -> Response:
-    resp = Response(status_code=204)
-    resp.delete_cookie(security.SESSION_COOKIE, path="/")
-    return resp
 
 
 @app.get("/", include_in_schema=False)
@@ -392,96 +333,102 @@ def root() -> FileResponse:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Resolve
+# Authentication  (exempt from the token check, see security.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/resolve")
-async def resolve(target: str = Query(...)) -> Response:
-    safe, err = _validate_target(target)
-    if err:
-        return err
-    resolution = await resolve_target(safe, reverse_dns=True)
-    # Expose ssrf_blocked as a 403 at this endpoint too, so the frontend
-    # can surface a clear error message before the user even starts a scan.
-    resolution_err = _check_resolution(resolution)
-    if resolution_err:
-        return resolution_err
-    return _json_response(resolution)
+@app.get("/api/auth/status", response_model=AuthStatus, include_in_schema=False)
+def auth_status(request: Request) -> dict:
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    return {"authenticated": security.is_authenticated(headers, security.get_settings())}
+
+
+@app.post("/api/auth", status_code=204, responses=_ERRORS, include_in_schema=False)
+def auth_login(payload: AuthRequest, request: Request) -> Response:
+    sec = security.get_settings()
+    if not sec.token_matches(payload.token):
+        logger.warning("auth_failed", client=request.client.host if request.client else None)
+        raise ApiError(401, "invalid_token", "Invalid token.")
+    resp = Response(status_code=204)
+    resp.set_cookie(
+        security.SESSION_COOKIE,
+        sec.session_value(),
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+    return resp
+
+
+@app.post("/api/auth/logout", status_code=204, include_in_schema=False)
+def auth_logout() -> Response:
+    resp = Response(status_code=204)
+    resp.delete_cookie(security.SESSION_COOKIE, path="/")
+    return resp
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# GeoIP
+# Resolve / GeoIP
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/geoip")
-async def geoip(target: str = Query(...)) -> Response:
-    safe, err = _validate_target(target)
-    if err:
-        return err
-    resolution = await resolve_target(safe)
-    resolution_err = _check_resolution(resolution)
-    if resolution_err:
-        return resolution_err
+@app.get("/api/resolve", response_model=ResolveResponse, responses=_ERRORS)
+async def resolve(target: Annotated[TargetStr, Query()]) -> dict:
+    return await _resolve_checked(target, reverse_dns=True)
+
+
+@app.get("/api/geoip", response_model=GeoIPResponse, response_model_exclude_none=True,
+         responses=_ERRORS)
+async def geoip(target: Annotated[TargetStr, Query()]) -> dict:
+    resolution = await _resolve_checked(target)
     if not geoip_db.is_enabled():
-        return _json_response({"ip": resolution["ip"], "enabled": False})
-    geo = await fetch_geoip(resolution["ip"])
-    return _json_response({"ip": resolution["ip"], "enabled": True, **geo})
+        return {"ip": resolution["ip"], "enabled": False}
+    return {"ip": resolution["ip"], "enabled": True, **await fetch_geoip(resolution["ip"])}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Scan  (SSE streaming)
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/scan")
+@app.get("/api/scan", response_class=StreamingResponse)
 async def scan(
     request:    Request,
-    target:     str   = Query(...),
-    mode:       str   = Query("quick",  pattern=r"^(quick|full|custom)$"),
-    profile:    str   = Query("normal", pattern=r"^(stealth|normal|aggressive|slow)$"),
-    port_start: int   = Query(1,    ge=1, le=65_535),
-    port_end:   int   = Query(1024, ge=1, le=65_535),
-    timeout:    float = Query(1.0,  ge=0.1, le=5.0),
+    target:     Annotated[str, Query(max_length=300)],
+    mode:       Annotated[str, Query(pattern=r"^(quick|full|custom)$")] = "quick",
+    profile:    Annotated[str, Query(pattern=r"^(stealth|normal|aggressive|slow)$")] = "normal",
+    port_start: Annotated[int, Query(ge=1, le=65_535)] = 1,
+    port_end:   Annotated[int, Query(ge=1, le=65_535)] = 1024,
+    timeout:    Annotated[float, Query(ge=0.1, le=5.0)] = 1.0,
 ) -> StreamingResponse:
+    """
+    Stream results as Server-Sent Events.  Errors that happen before the
+    stream starts are also sent as one SSE event
+    (``{"error": ..., "status": ...}``) so EventSource clients can show them.
+    """
 
-    def _error_response(msg: str, status: int = 400) -> StreamingResponse:
+    def _error_stream(msg: str, status: int) -> StreamingResponse:
         async def stream() -> AsyncGenerator[str, None]:
             yield f"data: {json.dumps({'error': msg, 'status': status})}\n\n"
         return StreamingResponse(stream(), media_type="text/event-stream")
 
-    safe, err = _validate_target(target)
-    if err:
-        return _error_response("Invalid target.")
+    try:
+        safe = validate_target(target)
+    except ValueError as exc:
+        return _error_stream(f"Invalid target: {exc}", 422)
     if mode == "custom" and port_start > port_end:
-        return _error_response(
-            f"Invalid custom range: start port ({port_start}) is greater than end port ({port_end})."
+        return _error_stream(
+            f"Invalid custom range: start port ({port_start}) is greater than end port ({port_end}).",
+            422,
         )
-
-    resolution = await resolve_target(safe, reverse_dns=True)
-
-    # SSRF check — propagate as an SSE error event so the frontend
-    # receives a structured message even over the event stream.
-    if not resolution["ip"]:
-        return _error_response(f"Could not resolve target: {resolution['error']}")
-    if resolution["error"] == "ssrf_blocked" or is_ssrf_blocked(resolution["ip"]):
-        return _error_response(
-            f"Scanning internal addresses is not permitted "
-            f"(resolved: {resolution['ip']}). "
-            "Set ALLOW_PRIVATE_IPS=true to scan private networks.",
-            status=403,
-        )
+    try:
+        resolution = await _resolve_checked(safe, reverse_dns=True)
+    except ApiError as exc:
+        return _error_stream(exc.detail, exc.status)
 
     ip    = resolution["ip"]
     ports = get_port_range(mode, port_start, port_end)
     prof  = PROFILES[profile]
 
-    logger.info(
-        "scan_start",
-        target=safe,
-        ip=ip,
-        mode=mode,
-        profile=profile,
-        port_count=len(ports),
-    )
+    logger.info("scan_start", target=safe, ip=ip, mode=mode, profile=profile, port_count=len(ports))
 
     async def event_stream() -> AsyncGenerator[str, None]:
         # The slot is taken inside the generator so it is released in the
@@ -499,7 +446,7 @@ async def scan(
     async def _scan_events() -> AsyncGenerator[str, None]:
         try:
             geo = await asyncio.wait_for(fetch_geoip(ip), timeout=3.0)
-        except Exception:  # noqa: BLE001
+        except Exception:
             geo = {}
 
         meta = {
@@ -549,9 +496,8 @@ async def scan(
                 return
 
         logger.info("scan_done", ip=ip, open=open_count, total=len(ports))
-        yield (
-            f"data: {json.dumps({'type': 'done', 'open_ports': open_count, 'total_scanned': len(ports)})}\n\n"
-        )
+        done = {"type": "done", "open_ports": open_count, "total_scanned": len(ports)}
+        yield f"data: {json.dumps(done)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -560,83 +506,63 @@ async def scan(
 # Network Discovery
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/discover")
+@app.get("/api/discover", response_model=DiscoverResponse, responses=_ERRORS)
 async def discover(
-    cidr:      str = Query(..., description="CIDR range, e.g. 192.168.1.0/24"),
-    max_hosts: int = Query(254, ge=1, le=1024),
-) -> Response:
-    network, err = _validate_cidr(cidr)
-    if err:
-        return err
+    cidr:      Annotated[DiscoverCidr, Query(description="IPv4 CIDR, /22 or narrower")],
+    max_hosts: Annotated[int, Query(ge=1, le=1024)] = 254,
+) -> dict:
+    network = ipaddress.IPv4Network(cidr)
     if network_ssrf_blocked(network):
-        return _ssrf_error(str(network))
+        raise ApiError(403, "ssrf_blocked", _ssrf_detail(str(network)))
     # islice: never materialise more host objects than will be pinged.
     hosts = list(itertools.islice(network.hosts(), max_hosts))
-    if not hosts:
-        return _json_response({"error": "No hosts in range", "alive": []})
-
     alive = await ping_sweep(hosts)
-    return _json_response({
-        "cidr":        cidr,
-        "total_hosts": len(hosts),
-        "alive_count": len(alive),
-        "alive":       alive,
-    })
+    return {"cidr": cidr, "total_hosts": len(hosts), "alive_count": len(alive), "alive": alive}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Subdomain Enumeration
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/subdomains")
-async def subdomains(domain: str = Query(...)) -> Response:
-    safe, err = _validate_domain(domain)
-    if err:
-        return err
-    result = await enumerate_subdomains(safe)
-    return _json_response(result)
+@app.get("/api/subdomains", response_model=SubdomainsResponse,
+         responses={**_ERRORS, 502: {"model": ErrorResponse}})
+async def subdomains(domain: Annotated[DomainStr, Query()]) -> dict:
+    result = await enumerate_subdomains(domain)
+    if result.get("error"):
+        raise ApiError(502, "upstream_error", result["error"])
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fingerprint (nmap -sV)
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/fingerprint")
+@app.get("/api/fingerprint", response_model=FingerprintResponse, responses=_ERRORS)
 async def fingerprint(
-    request: Request,  # reserved for future per-request cancellation
-    target:  str = Query(...),
-    ports:   str = Query(...),
-) -> Response:
-    safe, err = _validate_target(target)
-    if err:
-        return err
-    port_list, err2 = _validate_ports_str(ports, limits.MAX_FINGERPRINT_PORTS)
-    if err2:
-        return err2
-
-    resolution = await resolve_target(safe)
-    resolution_err = _check_resolution(resolution)
-    if resolution_err:
-        return resolution_err
+    target: Annotated[TargetStr, Query()],
+    ports:  Annotated[str, Query(max_length=1000)],
+) -> dict:
+    port_list  = _ports(ports, limits.MAX_FINGERPRINT_PORTS)
+    resolution = await _resolve_checked(target)
 
     ports_str   = ",".join(str(p) for p in port_list)
     timeout_sec = nmap_timeout(len(port_list))
     async with limits.nmap:
         results = await run_nmap(resolution["ip"], ports_str, timeout_sec)
 
-    return _json_response({
+    return {
         "ip":          resolution["ip"],
         "timeout_sec": timeout_sec,
-        "results":     results,
-    })
+        "results":     {str(k): v for k, v in results.items()},
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Screenshot
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/screenshot")
-async def get_screenshot(target: str = Query(...)) -> Response:
+@app.get("/api/screenshot", responses={200: {"content": {"image/png": {}}}, 204: {}})
+async def get_screenshot(target: Annotated[str, Query(max_length=300)]) -> Response:
     data = screenshot_cache.get(target)
     if not data:
         return Response(status_code=204)
@@ -647,125 +573,93 @@ async def get_screenshot(target: str = Query(...)) -> Response:
     )
 
 
-@app.post("/api/screenshot/capture")
+@app.post("/api/screenshot/capture", response_model=ScreenshotCaptureResponse,
+          responses={**_ERRORS, 503: {"model": ErrorResponse}})
 async def capture_screenshot(
     background_tasks: BackgroundTasks,
-    target: str = Query(...),
-    port:   int = Query(80, ge=1, le=65_535),
-) -> Response:
-    safe, err = _validate_target(target)
-    if err:
-        return err
-
-    resolution = await resolve_target(safe)
-    resolution_err = _check_resolution(resolution)
-    if resolution_err:
-        return resolution_err
-
-    hostname = resolution["hostname"] or resolution["ip"]
+    target: Annotated[TargetStr, Query()],
+    port:   Annotated[int, Query(ge=1, le=65_535)] = 80,
+) -> dict:
+    if not screenshots_supported():
+        raise ApiError(503, "screenshots_unavailable",
+                       "Screenshots are not available (Playwright is not installed).")
+    resolution = await _resolve_checked(target)
+    hostname   = resolution["hostname"] or resolution["ip"]
     # The slot is released by take_screenshot when the capture finishes.
     limits.screenshots.acquire()
     background_tasks.add_task(take_screenshot, hostname, resolution["ip"], port)
-
-    payload = ScreenshotCaptureResponse(status="capturing", target=hostname, port=port)
-    return _json_response(payload.model_dump())
+    return {"status": "capturing", "target": hostname, "port": port}
 
 
 @app.get("/api/screenshot/cache-stats", include_in_schema=False)
-async def screenshot_cache_stats() -> Response:
-    return _json_response(screenshot_cache.stats())
+async def screenshot_cache_stats() -> dict:
+    return screenshot_cache.stats()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Audit
+# Audit / SSL
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/audit")
+@app.get("/api/audit", response_model=AuditResponse, responses=_ERRORS)
 async def audit(
-    target:     str = Query(...),
-    open_ports: str = Query("80,443"),
-) -> Response:
-    safe, err = _validate_target(target)
-    if err:
-        return err
-    port_list, err2 = _validate_ports_str(open_ports)
-    if err2:
-        return err2
-
-    resolution = await resolve_target(safe)
-    resolution_err = _check_resolution(resolution)
-    if resolution_err:
-        return resolution_err
-
-    hostname = resolution["hostname"] or resolution["ip"]
+    target:     Annotated[TargetStr, Query()],
+    open_ports: Annotated[str, Query(max_length=6000)] = "80,443",
+) -> dict:
+    port_list  = _ports(open_ports, limits.MAX_AUDIT_PORTS)
+    resolution = await _resolve_checked(target)
+    hostname   = resolution["hostname"] or resolution["ip"]
     async with limits.audits:
         result = await run_full_audit(hostname, port_list, pinned_ip=resolution["ip"])
-    return _json_response({"target": target, "ip": resolution["ip"], **result})
+    return {"target": target, "ip": resolution["ip"], **result}
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SSL Analysis
-# ──────────────────────────────────────────────────────────────────────────────
-
-@app.get("/api/ssl")
+@app.get("/api/ssl", response_model=SSLResponse, responses=_ERRORS)
 async def ssl_analysis(
-    target:     str   = Query(...),
-    open_ports: str   = Query("443"),
-    timeout:    float = Query(8.0, ge=1.0, le=30.0),
-) -> Response:
-    safe, err = _validate_target(target)
-    if err:
-        return err
-    port_list, err2 = _validate_ports_str(open_ports)
-    if err2:
-        return err2
-
-    resolution = await resolve_target(safe)
-    resolution_err = _check_resolution(resolution)
-    if resolution_err:
-        return resolution_err
-
-    hostname = resolution["hostname"] or resolution["ip"]
-    loop     = asyncio.get_running_loop()
+    target:     Annotated[TargetStr, Query()],
+    open_ports: Annotated[str, Query(max_length=6000)] = "443",
+    timeout:    Annotated[float, Query(ge=1.0, le=30.0)] = 8.0,
+) -> dict:
+    port_list  = _ports(open_ports, limits.MAX_AUDIT_PORTS)
+    resolution = await _resolve_checked(target)
+    hostname   = resolution["hostname"] or resolution["ip"]
+    loop       = asyncio.get_running_loop()
     async with limits.ssl_checks:
         result = await loop.run_in_executor(
-            None, analyze_ssl_for_ports, hostname, port_list, timeout, resolution["ip"]
+            None, analyze_ssl_for_ports, hostname, port_list, timeout, resolution["ip"],
         )
-    return _json_response({"target": target, "ip": resolution["ip"], **result})
+    return {"target": target, "ip": resolution["ip"], **result}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CVE lookup
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/cve")
+@app.get("/api/cve", response_model=CVELookupResponse, responses=_ERRORS)
 async def cve_lookup_endpoint(
-    service:     str = Query(..., min_length=1, max_length=100),
-    version:     str = Query("", max_length=100),
-    max_results: int = Query(5, ge=1, le=10),
-    cpe:         str = Query("", max_length=200),
-) -> Response:
-    result = await lookup_cves(service, version, max_results, cpe=cpe or None)
-    return _json_response(result)
+    service:     Annotated[str, Query(min_length=1, max_length=100)],
+    version:     Annotated[str, Query(max_length=100)] = "",
+    max_results: Annotated[int, Query(ge=1, le=10)] = 5,
+    cpe:         Annotated[str, Query(max_length=200)] = "",
+) -> dict:
+    return await lookup_cves(service, version, max_results, cpe=cpe or None)
 
 
-@app.post("/api/cve/batch")
-async def cve_batch(versions: CVEBatchRequest) -> Response:
+@app.post("/api/cve/batch", response_model=CVEBatchResponse, responses=_ERRORS)
+async def cve_batch(versions: CVEBatchRequest) -> dict:
     payload = {port: info.model_dump() for port, info in versions.root.items()}
-    results = await lookup_cves_for_ports(payload)
-    return _json_response({"results": results})
+    return {"results": await lookup_cves_for_ports(payload)}
 
 
 @app.get("/api/cve/cache-stats", include_in_schema=False)
-async def cve_cache_stats() -> Response:
-    return _json_response(get_cache_stats())
+async def cve_cache_stats() -> dict:
+    return get_cache_stats()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Markdown export
+# Exports
 # ──────────────────────────────────────────────────────────────────────────────
 
-@app.post("/api/export/md")
+@app.post("/api/export/md", responses={**_ERRORS, 200: {"content": {"text/markdown": {}}}})
 async def export_markdown(payload: ExportRequest) -> Response:
     md = build_markdown_report(
         meta=payload.scan.meta,
@@ -780,65 +674,53 @@ async def export_markdown(payload: ExportRequest) -> Response:
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# PDF export
-# ──────────────────────────────────────────────────────────────────────────────
-
-@app.post("/api/export/pdf")
+@app.post("/api/export/pdf", responses={**_ERRORS, 200: {"content": {"application/pdf": {}}}})
 async def export_pdf(payload: ExportRequest) -> Response:
+    import pdf_generator   # heavy (ReportLab); imported on first use
+
+    screenshot_png: Optional[bytes] = None
+    if payload.screenshot_target:
+        sc = screenshot_cache.get(payload.screenshot_target)
+        if sc:
+            screenshot_png = sc.get("png")
+
+    loop = asyncio.get_running_loop()
     try:
-        from pdf_generator import generate_pdf  # type: ignore[import]
-
-        screenshot_png: Optional[bytes] = None
-        if payload.screenshot_target:
-            sc = screenshot_cache.get(payload.screenshot_target)
-            if sc:
-                screenshot_png = sc.get("png")
-
-        loop      = asyncio.get_running_loop()
         pdf_bytes = await loop.run_in_executor(
             None,
-            generate_pdf,
-            {
-                "meta":    payload.scan.meta,
-                "results": payload.scan.results,
-                "summary": payload.scan.summary,
-            },
+            pdf_generator.generate_pdf,
+            {"meta": payload.scan.meta, "results": payload.scan.results, "summary": payload.scan.summary},
             payload.audit,
             screenshot_png,
         )
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=lukitaport_report.pdf"},
-        )
-    except ImportError:
-        return _json_response({"error": "reportlab not installed."}, 500)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("pdf_export_error", error=str(exc), exc_info=True)
-        return _json_response({"ok": False, "error": "PDF generation failed."}, 500)
+        raise ApiError(500, "pdf_failed", "PDF generation failed.") from exc
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=lukitaport_report.pdf"},
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Admin / dev helpers
+# Admin (only when LUKITA_ENABLE_ADMIN=true, see security.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/admin/reload-signatures", include_in_schema=False)
-async def reload_tech_signatures() -> Response:
+async def reload_tech_signatures() -> dict:
     """Hot-reload technology detection signatures from tech_signatures.json."""
     from auditor import reload_signatures
-    count = reload_signatures()
-    return _json_response({"ok": True, "signatures_loaded": count})
+    return {"ok": True, "signatures_loaded": reload_signatures()}
 
 
 @app.get("/api/admin/status", include_in_schema=False)
-async def server_status() -> Response:
-    """Health / status endpoint for monitoring."""
-    from scan_service import _browser as pw_browser
-    return _json_response({
-        "ok":                 True,
-        "playwright_ready":   pw_browser is not None,
-        "screenshot_cache":   screenshot_cache.stats(),
-        "limits":             limits.stats(),
-        "allow_private_ips":  os.getenv("ALLOW_PRIVATE_IPS", "false"),
-    })
+async def server_status() -> dict:
+    import scan_service
+    return {
+        "ok":                True,
+        "playwright_ready":  scan_service.browser_ready(),
+        "screenshot_cache":  screenshot_cache.stats(),
+        "limits":            limits.stats(),
+        "allow_private_ips": app_settings.get_settings().allow_private_ips,
+    }

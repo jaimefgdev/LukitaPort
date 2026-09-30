@@ -100,7 +100,7 @@ class _AuditSession:
         self.pins   = pins
         self.client = safe_http.make_client(timeout)
 
-    async def __aenter__(self) -> "_AuditSession":
+    async def __aenter__(self) -> _AuditSession:
         return self
 
     async def __aexit__(self, *exc) -> None:
@@ -126,7 +126,7 @@ async def _fetch(
     except safe_http.BlockedDestination as exc:
         logger.warning("fetch_blocked", url=url, reason=str(exc))
         return None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("fetch_failed", url=url, error=str(exc))
         return None
 
@@ -154,10 +154,6 @@ def _candidate_base_urls(target: str, open_ports: list[int]) -> list[str]:
     """
     urls = [_base_url(scheme, target, port) for scheme, port in _WEB_PORTS if port in open_ports]
     return urls or [_base_url("https", target, 443), _base_url("http", target, 80)]
-
-
-def _choose_base_url(target: str, open_ports: list[int]) -> str:
-    return _candidate_base_urls(target, open_ports)[0]
 
 
 async def _prefetch(
@@ -475,7 +471,7 @@ async def _scan_sensitive_paths(
                 }
         except safe_http.BlockedDestination as exc:
             logger.warning("path_check_blocked", url=url, reason=str(exc))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("path_check_failed", url=url, error=str(exc))
         return None
 
@@ -487,7 +483,7 @@ async def _scan_sensitive_paths(
     errors:    int        = 0
 
     for r in raw:
-        if isinstance(r, Exception):
+        if isinstance(r, BaseException):
             errors += 1
         elif r is None:
             not_found += 1

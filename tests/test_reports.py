@@ -1,8 +1,6 @@
 """Point 10: exported reports must not be injectable by scan data."""
 
-import io
 
-import main
 import pdf_generator
 from scan_service import build_markdown_report
 
@@ -58,3 +56,17 @@ def test_pdf_error_does_not_leak_details(app_client, monkeypatch):
     resp = app_client.post("/api/export/pdf", json={"scan": {"meta": {}, "results": [], "summary": {}}})
     assert resp.status_code == 500
     assert "secret" not in resp.text
+
+
+def test_bad_port_values_do_not_crash_exports(app_client):
+    payload = {"scan": {"meta": {}, "summary": {"open": 3},
+                        "results": [{"port": [1], "state": "open"}, {"port": {"x": 1}, "state": "open"},
+                                    {"port": "22", "state": "open"}]}}
+    assert app_client.post("/api/export/md", json=payload).status_code == 200
+    assert app_client.post("/api/export/pdf", json=payload).status_code == 200
+
+
+def test_port_risk_helper():
+    from config import port_risk
+    assert port_risk(22) == "medium" and port_risk("3389") == "high"
+    assert port_risk([1]) == "info" and port_risk(None) == "info" and port_risk("x") == "info"

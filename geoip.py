@@ -19,6 +19,7 @@ import os
 import threading
 from typing import Any, Optional
 
+import settings
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -28,9 +29,8 @@ _readers: dict[str, Any] = {}
 
 
 def _db_paths() -> tuple[Optional[str], Optional[str]]:
-    city = os.getenv("LUKITA_GEOIP_DB", "").strip() or None
-    asn  = os.getenv("LUKITA_GEOIP_ASN_DB", "").strip() or None
-    return city, asn
+    cfg = settings.get_settings()
+    return cfg.geoip_db, cfg.geoip_asn_db
 
 
 def is_enabled() -> bool:
@@ -49,7 +49,7 @@ def status() -> dict:
     }
 
 
-def _open(path: str):  # noqa: ANN202
+def _open(path: str):
     with _lock:
         reader = _readers.get(path)
         if reader is None:
@@ -83,7 +83,7 @@ def lookup(ip: str) -> dict:
             number = asn.get("autonomous_system_number")
             result["asn"] = f"AS{number}" if number else ""
             result["org"] = asn.get("autonomous_system_organization", "")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("geoip_lookup_failed", ip=ip, error=str(exc))
         return {}
     return {k: v for k, v in result.items() if v}

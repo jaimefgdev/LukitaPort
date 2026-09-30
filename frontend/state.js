@@ -14,6 +14,7 @@ export const state = {
     geoData:     null,
     portRisk:    {},   // Populated at startup from /api/config
     geoip:       { enabled: false, source: null },
+    nmapTimeout: { base: 20, perPort: 4 },   // overwritten from /api/config
 };
 
 export const RISK_LABELS = {
@@ -31,6 +32,9 @@ export async function initConfig() {
         // Keys come as strings from JSON; keep them as-is so getRisk works with both
         state.portRisk = data.portRisk || {};
         state.geoip    = data.geoip || { enabled: false, source: null };
+        if (data.nmap) {
+            state.nmapTimeout = { base: data.nmap.timeoutBase, perPort: data.nmap.timeoutPerPort };
+        }
     } catch (e) {
         console.warn('[LukitaPort] Failed to load remote config, PORT_RISK will be empty:', e);
     }
