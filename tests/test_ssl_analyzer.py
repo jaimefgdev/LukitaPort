@@ -1,9 +1,12 @@
 """Point 2: certificates must be read even when verification is disabled."""
 
-from datetime import datetime, timedelta, timezone
+import ssl
+import warnings
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import ssl_analyzer
 from ssl_analyzer import analyze_ssl, analyze_ssl_for_ports
 from tls_helpers import LoopbackTLSServer, make_cert, write_pem
 
@@ -65,7 +68,7 @@ def test_hostname_mismatch_is_not_trusted(tmp_path, ca):
 
 
 def test_expired_certificate_grades_f(tmp_path):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cert, key = make_cert(
         "localhost", not_before=now - timedelta(days=30), not_after=now - timedelta(days=2),
     )
@@ -96,11 +99,6 @@ def test_analyze_for_ports_only_https_ports():
 
 
 # ── Point 18: TLS version probing ─────────────────────────────────────────────
-
-import ssl
-import warnings
-
-import ssl_analyzer
 
 
 @pytest.fixture

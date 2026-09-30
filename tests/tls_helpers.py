@@ -9,7 +9,7 @@ from __future__ import annotations
 import socket
 import ssl
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 
 from cryptography import x509
@@ -38,7 +38,7 @@ def make_cert(
 ):
     """Return ``(cert, key)``; self-signed unless an issuer is given."""
     key  = ec.generate_private_key(ec.SECP256R1())
-    now  = datetime.now(timezone.utc)
+    now  = datetime.now(UTC)
     subj = _name(cn, org)
     builder = (
         x509.CertificateBuilder()
@@ -113,7 +113,7 @@ class LoopbackTLSServer:
         while not self._stop.is_set():
             try:
                 conn, _ = self._sock.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 return                      # listening socket closed
@@ -126,7 +126,7 @@ class LoopbackTLSServer:
             finally:
                 conn.close()
 
-    def __enter__(self) -> "LoopbackTLSServer":
+    def __enter__(self) -> LoopbackTLSServer:
         self._thread.start()
         return self
 

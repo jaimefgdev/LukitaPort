@@ -5,6 +5,7 @@ import ipaddress
 import pytest
 
 import main
+import models
 import scan_service
 
 
@@ -24,15 +25,18 @@ def swept(monkeypatch):
 @pytest.mark.parametrize("cidr", ["10.0.0.0/8", "127.0.0.0/21", "0.0.0.0/0"])
 def test_too_wide_ipv4_is_rejected(app_client, swept, cidr):
     resp = app_client.get("/api/discover", params={"cidr": cidr})
-    assert resp.status_code == 400
-    assert "too large" in resp.json()["error"]
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["ok"] is False and body["error"] == "validation_error"
+    assert "too large" in body["detail"]
     assert swept == []
 
 
 @pytest.mark.parametrize("cidr", ["::1/128", "fd00::/64", "::/0"])
 def test_ipv6_is_rejected(app_client, swept, cidr):
     resp = app_client.get("/api/discover", params={"cidr": cidr})
-    assert resp.status_code == 400
+    assert resp.status_code == 422
+    assert "IPv4" in resp.json()["detail"]
     assert swept == []
 
 
@@ -44,7 +48,7 @@ def test_internal_network_is_ssrf_blocked(app_client, swept):
 
 
 def test_invalid_cidr(app_client, swept):
-    assert app_client.get("/api/discover", params={"cidr": "nope"}).status_code == 400
+    assert app_client.get("/api/discover", params={"cidr": "nope"}).status_code == 422
 
 
 def test_widest_allowed_network_is_capped_by_max_hosts(app_client, swept, allow_private):
@@ -59,8 +63,7 @@ def test_validate_cidr_does_not_enumerate(monkeypatch):
         raise AssertionError("hosts() must not be called during validation")
 
     monkeypatch.setattr(ipaddress.IPv4Network, "hosts", explode)
-    network, err = main._validate_cidr("127.0.0.0/24")
-    assert err is None and network.prefixlen == 24
+    assert models.validate_discover_cidr("127.0.0.5/24") == "127.0.0.0/24"
 
 
 async def test_ping_sweep_sorts_numerically(monkeypatch):

@@ -8,27 +8,56 @@ on:
 permissions:
   contents: read
 
+env:
+  # Tests never need a browser; skip Playwright's browser download.
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: ruff
+        run: ruff check .
+      - name: mypy
+        run: mypy .
+
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
-    env:
-      # Tests never need a browser; skip Playwright's browser download.
-      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements*.txt
-      - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+          cache-dependency-path: requirements-dev.txt
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
       - name: Run tests
         run: python -m pytest -v
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pip-audit
+      - name: Audit locked dependencies
+        run: |
+          pip-audit --require-hashes -r requirements.txt
+          pip-audit --require-hashes -r requirements-dev.txt
 
   frontend:
     runs-on: ubuntu-latest
@@ -41,3 +70,30 @@ jobs:
         run: for f in frontend/*.js; do node --check "$f"; done
       - name: Run unit tests
         run: node --test 'frontend/tests/*.test.mjs'
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build lite image (no Chromium)
+        run: docker build --build-arg WITH_SCREENSHOTS=false -t lukitaport:ci .
+      - name: Refuses to start without a token
+        run: |
+          if docker run --rm lukitaport:ci; then
+            echo "container started without LUKITA_API_TOKEN" && exit 1
+          fi
+      - name: Starts with a token and answers /api/health
+        run: |
+          docker run -d --name lp -p 127.0.0.1:8000:8000 \
+            -e LUKITA_API_TOKEN=ci-token-0123456789abcdef lukitaport:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/api/health && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8000/api/health | grep -q '"ok":true'
+          # The API itself requires the token.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/config)" = "401"
+          docker inspect --format '{{.Config.User}}' lp | grep -q lukita
+      - name: Container logs
+        if: always()
+        run: docker logs lp || true

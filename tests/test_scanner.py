@@ -139,7 +139,7 @@ def _raise(exc):
     (ConnectionResetError(errno.ECONNRESET, "reset"), "closed"),
     (OSError(errno.EHOSTUNREACH, "no route"), "filtered"),
     (OSError(errno.ENETUNREACH, "net unreachable"), "filtered"),
-    (asyncio.TimeoutError(), "filtered"),
+    (TimeoutError(), "filtered"),
 ])
 async def test_error_states(monkeypatch, exc, state):
     monkeypatch.setattr(asyncio, "open_connection", _raise(exc))

@@ -49,7 +49,7 @@ class SafeResponse:
 def make_client(timeout: float = 6.0) -> httpx.AsyncClient:
     """Client for use with ``fetch``: no redirects, no TLS verification."""
     return httpx.AsyncClient(
-        verify=False,               # auditing broken TLS is the point
+        verify=False,  # noqa: S501 — auditing sites with broken TLS is the point
         follow_redirects=False,     # redirects are validated hop by hop
         timeout=timeout,
         headers={"User-Agent": USER_AGENT},

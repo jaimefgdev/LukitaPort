@@ -18,15 +18,15 @@ Async NVD CVE lookup with:
 from __future__ import annotations
 
 import asyncio
-import os
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from email.utils import parsedate_to_datetime
 from typing import Optional
 
 import httpx
 
+import settings
 from cache import TTLLRUCache
 from logging_config import get_logger
 
@@ -38,7 +38,6 @@ logger = get_logger(__name__)
 
 NVD_API_BASE           = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 REQUEST_TIMEOUT        = 12.0
-RESULTS_PER_PAGE       = 5
 NVD_REQUEST_DELAY      = 6.2   # 5 requests / 30 s without an API key
 NVD_REQUEST_DELAY_KEY  = 0.6   # 50 requests / 30 s with an API key
 
@@ -85,7 +84,7 @@ def _nvd_lock() -> asyncio.Lock:
 
 
 def _api_key() -> Optional[str]:
-    return os.getenv("NVD_API_KEY", "").strip() or None
+    return settings.get_settings().nvd_api_key
 
 
 def _request_delay() -> float:
@@ -125,8 +124,8 @@ def parse_retry_after(value: Optional[str], now: Optional[datetime] = None) -> O
     except (TypeError, ValueError, IndexError):
         return None
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    now = now or datetime.now(timezone.utc)
+        when = when.replace(tzinfo=UTC)
+    now = now or datetime.now(UTC)
     return max(0.0, (when - now).total_seconds())
 
 
@@ -298,6 +297,7 @@ async def lookup_cves(
     keyword ``"<service> <version>"``.
     """
     cpe23 = cpe_to_23(cpe) if cpe else None
+    params: dict[str, str | int]
     if cpe23:
         query_desc = cpe23
         params     = {"virtualMatchString": cpe23}
