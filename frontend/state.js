@@ -13,6 +13,7 @@ export const state = {
     versions:    {},
     geoData:     null,
     portRisk:    {},   // Populated at startup from /api/config
+    geoip:       { enabled: false, source: null },
 };
 
 export const RISK_LABELS = {
@@ -29,6 +30,7 @@ export async function initConfig() {
         const data = await resp.json();
         // Keys come as strings from JSON; keep them as-is so getRisk works with both
         state.portRisk = data.portRisk || {};
+        state.geoip    = data.geoip || { enabled: false, source: null };
     } catch (e) {
         console.warn('[LukitaPort] Failed to load remote config, PORT_RISK will be empty:', e);
     }

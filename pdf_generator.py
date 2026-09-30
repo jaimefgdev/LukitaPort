@@ -1,4 +1,5 @@
 import io
+from xml.sax.saxutils import escape as xml_escape
 from datetime import datetime
 from typing import Optional
 
@@ -37,6 +38,17 @@ def make_styles():
     styles["green"]    = ParagraphStyle("green",    fontName="Helvetica-Bold", fontSize=9,  textColor=C_GREEN)
     styles["small"]    = ParagraphStyle("small",    fontName="Helvetica",      fontSize=7.5, textColor=C_MUTED, leading=11)
     return styles
+
+
+def _esc(value) -> str:  # noqa: ANN001
+    """
+    Escape a value for ReportLab ``Paragraph`` markup.
+
+    Paragraph text is parsed as XML-like markup, and most values here come
+    from the scanned host (banners, headers) or the client's export payload,
+    so an unescaped ``<`` would break the PDF or inject formatting.
+    """
+    return xml_escape("" if value is None else str(value))
 
 
 def _risk_color(risk: str) -> colors.Color:
@@ -112,10 +124,10 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
 
     story.append(Paragraph("RESULTS SUMMARY", styles["section"]))
     card_data = [[
-        Paragraph(f'<font size="22"><b>{summary.get("open", 0)}</b></font><br/><font size="7">OPEN</font>',     styles["green"]),
-        Paragraph(f'<font size="22"><b>{summary.get("closed", 0)}</b></font><br/><font size="7">CLOSED</font>', styles["body"]),
-        Paragraph(f'<font size="22"><b>{summary.get("filtered", 0)}</b></font><br/><font size="7">FILTERED</font>', styles["body"]),
-        Paragraph(f'<font size="22"><b>{summary.get("total", 0)}</b></font><br/><font size="7">TOTAL</font>',   styles["accent"]),
+        Paragraph(f'<font size="22"><b>{_esc(summary.get("open", 0))}</b></font><br/><font size="7">OPEN</font>',     styles["green"]),
+        Paragraph(f'<font size="22"><b>{_esc(summary.get("closed", 0))}</b></font><br/><font size="7">CLOSED</font>', styles["body"]),
+        Paragraph(f'<font size="22"><b>{_esc(summary.get("filtered", 0))}</b></font><br/><font size="7">FILTERED</font>', styles["body"]),
+        Paragraph(f'<font size="22"><b>{_esc(summary.get("total", 0))}</b></font><br/><font size="7">TOTAL</font>',   styles["accent"]),
     ]]
     card_table = Table(card_data, colWidths=[42*mm, 42*mm, 42*mm, 42*mm])
     card_table.setStyle(TableStyle([
@@ -180,12 +192,12 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
         risk    = PORT_RISK.get(port, "info") if state == "open" else "info"
         version = str((r.get("version") or r.get("banner") or ""))[:40]
         rows.append([
-            Paragraph(str(port), styles["mono"]),
-            Paragraph(state_map.get(state, state), ParagraphStyle("s",  fontName="Courier-Bold", fontSize=7.5, textColor=_state_color(state))),
-            Paragraph(r.get("service", ""), styles["mono"]),
+            Paragraph(_esc(port), styles["mono"]),
+            Paragraph(_esc(state_map.get(state, state)), ParagraphStyle("s",  fontName="Courier-Bold", fontSize=7.5, textColor=_state_color(state))),
+            Paragraph(_esc(r.get("service", "")), styles["mono"]),
             Paragraph(risk_map.get(risk, "—"), ParagraphStyle("rk", fontName="Courier-Bold", fontSize=7.5, textColor=_risk_color(risk))),
-            Paragraph(f"{r.get('response_time_ms')} ms" if r.get("response_time_ms") is not None else "—", styles["small"]),
-            Paragraph(version, styles["small"]),
+            Paragraph(f"{_esc(r.get('response_time_ms'))} ms" if r.get("response_time_ms") is not None else "—", styles["small"]),
+            Paragraph(_esc(version), styles["small"]),
         ])
 
     results_table = Table(rows, colWidths=[18*mm, 20*mm, 28*mm, 18*mm, 22*mm, 62*mm], repeatRows=1)
@@ -210,7 +222,7 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
             grade       = headers_audit.get("grade", "?")
             score       = headers_audit.get("score", 0)
             grade_color = {"A": C_GREEN, "B": C_GREEN, "C": C_YELLOW, "D": C_YELLOW, "F": C_ACCENT}.get(grade, C_MUTED)
-            story.append(Paragraph(f'<font size="20"><b>{grade}</b></font>  <font size="9">Score: {score}/100</font>',
+            story.append(Paragraph(f'<font size="20"><b>{_esc(grade)}</b></font>  <font size="9">Score: {_esc(score)}/100</font>',
                                    ParagraphStyle("gp", fontName="Courier-Bold", fontSize=20, textColor=grade_color, leading=24)))
             story.append(Spacer(1, 8))
 
@@ -220,9 +232,9 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
                 miss_rows = [["HEADER", "SEVERITY", "DESCRIPTION"]]
                 for h in missing:
                     miss_rows.append([
-                        Paragraph(h["header"], styles["mono"]),
-                        Paragraph(h["severity"].upper(), ParagraphStyle("sv", fontName="Courier-Bold", fontSize=7.5, textColor=_risk_color(h["severity"]))),
-                        Paragraph(h.get("description_en", ""), styles["small"]),
+                        Paragraph(_esc(h["header"]), styles["mono"]),
+                        Paragraph(_esc(str(h["severity"]).upper()), ParagraphStyle("sv", fontName="Courier-Bold", fontSize=7.5, textColor=_risk_color(h["severity"]))),
+                        Paragraph(_esc(h.get("description_en", "")), styles["small"]),
                     ])
                 miss_table = Table(miss_rows, colWidths=[55*mm, 22*mm, 91*mm])
                 miss_table.setStyle(TableStyle([
@@ -241,7 +253,7 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
             if dangerous:
                 story.append(Paragraph("Information disclosure headers (should be removed):", styles["label"]))
                 for h in dangerous:
-                    story.append(Paragraph(f'<b>{h["header"]}:</b> {h["value"]} — {h["description"]}',
+                    story.append(Paragraph(f'<b>{_esc(h["header"])}:</b> {_esc(h["value"])} — {_esc(h["description"])}',
                                            ParagraphStyle("dh", fontName="Courier", fontSize=7.5, textColor=C_YELLOW, spaceAfter=3)))
                 story.append(Spacer(1, 10))
 
@@ -255,7 +267,7 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
                 for j in range(3):
                     if i + j < len(techs):
                         t = techs[i + j]
-                        row.append(Paragraph(f'{t["icon"]} <b>{t["name"]}</b><br/><font size="7">{t["category"]}</font>',
+                        row.append(Paragraph(f'{_esc(t["icon"])} <b>{_esc(t["name"])}</b><br/><font size="7">{_esc(t["category"])}</font>',
                                              ParagraphStyle("tt", fontName="Helvetica", fontSize=8.5, textColor=C_TEXT, leading=13)))
                     else:
                         row.append(Paragraph("", styles["body"]))
@@ -277,10 +289,10 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
             path_rows = [["PATH", "LABEL", "SEVERITY", "STATUS"]]
             for f in all_found:
                 path_rows.append([
-                    Paragraph(f["path"], styles["mono"]),
-                    Paragraph(f["label"], styles["small"]),
-                    Paragraph(f["severity"].upper(), ParagraphStyle("ps", fontName="Courier-Bold", fontSize=7.5, textColor=_risk_color(f["severity"]))),
-                    Paragraph(str(f["status_code"]), styles["mono"]),
+                    Paragraph(_esc(f["path"]), styles["mono"]),
+                    Paragraph(_esc(f["label"]), styles["small"]),
+                    Paragraph(_esc(str(f["severity"]).upper()), ParagraphStyle("ps", fontName="Courier-Bold", fontSize=7.5, textColor=_risk_color(f["severity"]))),
+                    Paragraph(_esc(f["status_code"]), styles["mono"]),
                 ])
             path_table = Table(path_rows, colWidths=[48*mm, 48*mm, 26*mm, 46*mm])
             path_table.setStyle(TableStyle([

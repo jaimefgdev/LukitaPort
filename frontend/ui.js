@@ -9,9 +9,8 @@
 //   private variables _lastSSLData / _lastCVEData with explicit getters.
 //   This eliminates implicit global state and makes re-renders on lang change
 //   fully self-contained within the module.
-// • initDelegationStyles() — injects ONE <style> block into <head> for the
-//   .btn-cve-launch :hover rule that previously lived as onmouseover/onmouseout.
-//   This is the only style injection; it runs once at app start.
+// • Hover rules for dynamic components (.btn-cve-launch, .discover-host-card)
+//   live in styles.css; nothing injects <style> elements at runtime.
 //
 // Batch rendering (rAF DocumentFragment) and smart auto-scroll are unchanged.
 
@@ -48,35 +47,6 @@ export function initLegal() {
     });
 }
 
-// ── CSP delegation styles ─────────────────────────────────────────────────────
-/**
- * initDelegationStyles — inject a single <style> element for dynamic component
- * hover states that previously required onmouseover/onmouseout JS attributes.
- *
- * Called once from main.js init.  Adding CSS rules this way is fully
- * compliant with `style-src 'self'` because <style> blocks in the
- * document are not restricted by script-src.
- *
- * Idempotent: checks for existing id before inserting.
- */
-export function initDelegationStyles() {
-    if (document.getElementById('lukita-delegation-styles')) return;
-    const style = document.createElement('style');
-    style.id = 'lukita-delegation-styles';
-    style.textContent = `
-        /* Hover for dynamically-rendered CVE launch button (replaces onmouseover/onmouseout) */
-        .btn-cve-launch:hover {
-            border-color: #ff0033 !important;
-            color: #ff0033 !important;
-        }
-        /* Hover for discover host cards (replaces JS pointer feedback) */
-        .discover-host-card:hover {
-            border-color: rgba(0, 255, 136, .5) !important;
-        }
-    `;
-    document.head.appendChild(style);
-}
-
 // ── Language ──────────────────────────────────────────────────────────────────
 export function applyLang(lang) {
     state.lang = lang;
@@ -97,6 +67,20 @@ export function updateSummary() {
     $('sum-closed').textContent   = state.counts.closed;
     $('sum-filtered').textContent = state.counts.filtered;
     $('sum-total').textContent    = state.results.length;
+}
+
+// ── GeoIP notice ──────────────────────────────────────────────────────────────
+// GeoIP is off by default.  When the operator enables it, make it explicit
+// that lookups use a local GeoLite2 database (no third-party requests).
+export function renderGeoipNotice() {
+    const el = $('geoip-notice');
+    if (!el) return;
+    if (!state.geoip?.enabled) { el.hidden = true; return; }
+    const src = escapeHTML(state.geoip.source || 'GeoLite2');
+    el.innerHTML =
+        `<span class="es">🌍 GeoIP activada · ${src} · las IP se consultan solo en local</span>` +
+        `<span class="en">🌍 GeoIP enabled · ${src} · lookups stay on this machine</span>`;
+    el.hidden = false;
 }
 
 // ── GeoIP badge ───────────────────────────────────────────────────────────────

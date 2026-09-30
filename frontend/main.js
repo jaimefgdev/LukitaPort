@@ -31,7 +31,8 @@
 // boilerplate needed.
 
 import { state, initConfig }                         from './state.js';
-import { $, initLegal, initDelegationStyles, applyLang,
+import { ensureAuthenticated }                       from './auth.js';
+import { $, initLegal, applyLang, renderGeoipNotice,
          renderHistory, setDotBlink, updateSummary,
          showError, renderTable, copyText }           from './ui.js';
 import { startScan, stopScan, runFingerprint,
@@ -42,9 +43,10 @@ import { exportJSON, exportCSV, exportHTMLReport,
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 (async () => {
-    await initConfig();         // Fetch PORT_RISK from backend before renders
     initLegal();
-    initDelegationStyles();     // Inject CSS for dynamic component hover states
+    await ensureAuthenticated(); // Session cookie before any other /api/ call
+    await initConfig();          // Fetch PORT_RISK + GeoIP status from backend
+    renderGeoipNotice();
     renderHistory();
 })();
 

@@ -25,6 +25,23 @@
     </div>
 </div>
 
+<!-- ACCESO (token de la API) -->
+<div id="auth-overlay" class="hidden">
+    <form class="legal-popup" id="auth-form" autocomplete="off">
+        <div class="legal-popup-title">
+            <span class="es">🔑 ACCESO</span>
+            <span class="en">🔑 SIGN IN</span>
+        </div>
+        <p class="es">Introduce el token de la API (<code>LUKITA_API_TOKEN</code>, o el que aparece en la consola del servidor al arrancar).</p>
+        <p class="en">Enter the API token (<code>LUKITA_API_TOKEN</code>, or the one printed on the server console at startup).</p>
+        <input type="password" id="auth-token" class="auth-input" spellcheck="false" autocomplete="off" required/>
+        <div class="auth-error" id="auth-error"></div>
+        <div class="legal-popup-actions">
+            <button class="btn-accept" type="submit"><span class="es">Entrar</span><span class="en">Sign in</span></button>
+        </div>
+    </form>
+</div>
+
 <!-- TOAST -->
 <div id="toast"></div>
 
@@ -114,6 +131,8 @@
                 <span class="es">Iniciar Escaneo</span>
                 <span class="en">Start Scan</span>
             </button>
+
+            <div class="geoip-notice" id="geoip-notice" hidden></div>
 
             <div class="status-bar" id="status-bar">
                 <div class="status-info">
@@ -219,7 +238,7 @@
                 <span class="es">Ejecuta <strong style="color:#aaa">Fingerprinting</strong> primero para mejores resultados, luego lanza el análisis CVE.</span>
                 <span class="en">Run <strong style="color:#aaa">Fingerprinting</strong> first for better results, then launch CVE analysis.</span>
                 <br><br>
-                <button id="btn-launch-cve" onclick="window.launchCVELookup && window.launchCVELookup()" style="padding:8px 22px;background:transparent;border:1px solid #333;border-radius:4px;color:#888;font-family:var(--font-mono);font-size:11px;cursor:pointer;letter-spacing:.8px;transition:all .2s" onmouseover="this.style.borderColor='#ff0033';this.style.color='#ff0033'" onmouseout="this.style.borderColor='#333';this.style.color='#888'">
+                <button id="btn-launch-cve" class="btn-cve-launch" data-action="launch-cve">
                     🐛 <span class="es">Buscar CVEs ahora</span><span class="en">Search CVEs now</span>
                 </button>
             </div>

@@ -215,26 +215,34 @@ cp .env.example .env
 All configuration is through environment variables. Copy `.env.example` to `.env`.
 
 ```dotenv
-# ── Security ──────────────────────────────────────────────────────────────────
-# Allow scanning private/internal IP addresses.
-# Set to "true" ONLY for local lab environments.
-# Default: false (production-safe — blocks 10.x, 192.168.x, 127.x, 169.254.x, etc.)
+# ── Access control (see security.py) ─────────────────────────────────────────
+# API token (≥ 16 chars). Optional on 127.0.0.1 — a random one is generated
+# and a login URL is printed at startup. MANDATORY on any other interface.
+LUKITA_API_TOKEN=
+LUKITA_HOST=127.0.0.1           # interface run.py listens on
+LUKITA_PORT=8000
+LUKITA_ALLOWED_HOSTS=           # Host header allow-list (default 127.0.0.1,localhost,::1)
+LUKITA_ENABLE_ADMIN=false       # /api/admin/* only exists when true
+LUKITA_RATE_LIMIT=120           # /api/ requests per client per minute
+LUKITA_MAX_BODY_BYTES=5242880
+
+# ── Resource limits (concurrent operations; extra requests get HTTP 429) ─────
+LUKITA_MAX_SCANS=2
+LUKITA_MAX_NMAP=1
+LUKITA_MAX_SCREENSHOTS=2
+LUKITA_MAX_AUDITS=2
+LUKITA_MAX_SSL=2
+
+# ── SSRF ─────────────────────────────────────────────────────────────────────
+# Allow scanning private/internal IP addresses. "true" ONLY for local labs.
 ALLOW_PRIVATE_IPS=false
 
-# ── Server ────────────────────────────────────────────────────────────────────
-HOST=0.0.0.0
-PORT=8000
+# ── GeoIP (off by default; local MaxMind GeoLite2 files only) ────────────────
+LUKITA_GEOIP_DB=                # e.g. ./data/GeoLite2-City.mmdb
+LUKITA_GEOIP_ASN_DB=            # optional GeoLite2-ASN.mmdb
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-# DEBUG | INFO | WARNING | ERROR
+# ── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL=INFO
-
-# ── NVD API (optional — increases CVE rate limits) ────────────────────────────
-# Get a free key at https://nvd.nist.gov/developers/request-an-api-key
-NVD_API_KEY=
-
-# ── GeoIP database path ───────────────────────────────────────────────────────
-GEOIP_DB_PATH=./data/GeoLite2-City.mmdb
 ```
 
 ### ALLOW_PRIVATE_IPS — SSRF Protection
@@ -250,21 +258,18 @@ The SSRF check runs **after DNS resolution** to defend against DNS-rebinding att
 
 ## Running
 
-### Development
-
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python run.py
 ```
 
-### Production
+`run.py` listens on `127.0.0.1:8000` by default and prints a login URL with a
+token generated at each start (`http://127.0.0.1:8000/#token=…`) unless `LUKITA_API_TOKEN` is set, in
+which case the UI asks for the token. It refuses to listen on any other
+interface (`LUKITA_HOST=0.0.0.0`, a LAN IP…) without `LUKITA_API_TOKEN`.
+It always runs a single worker (scan slots, caches and the browser are
+per-process state).
 
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
-# Note: use workers=1 — the scan engine holds per-process state.
-# For horizontal scaling, put a reverse proxy in front.
-```
-
-Open `http://localhost:8000` in your browser.
+API clients can authenticate with `Authorization: Bearer <token>`.
 
 ---
 
@@ -435,44 +440,15 @@ All client-side exports use `yieldToMain()` (setTimeout 0 ms) every 5,000 rows t
 
 ## Docker
 
-```yaml
-# docker-compose.yml
-version: "3.9"
-services:
-  lukitaport:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - ALLOW_PRIVATE_IPS=false
-      - LOG_LEVEL=INFO
-      - NVD_API_KEY=${NVD_API_KEY}
-    volumes:
-      - ./data:/app/data          # GeoIP database
-    restart: unless-stopped
-```
-
-```dockerfile
-# Dockerfile
-FROM python:3.12-slim
-
-RUN apt-get update && apt-get install -y nmap && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-RUN playwright install chromium --with-deps
-
-COPY . .
-
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
 ```bash
+export LUKITA_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 docker compose up --build
 ```
+
+Then open `http://127.0.0.1:8000` and enter the token. The compose file
+publishes the port on `127.0.0.1` only, refuses to start without
+`LUKITA_API_TOKEN`, runs as an unprivileged user with all capabilities
+dropped, a read-only filesystem and `no-new-privileges`.
 
 ---
 
@@ -685,26 +661,34 @@ cp .env.example .env
 Toda la configuración se realiza mediante variables de entorno. Copia `.env.example` a `.env`.
 
 ```dotenv
-# ── Seguridad ─────────────────────────────────────────────────────────────────
-# Permite escanear IPs privadas/internas.
-# Poner a "true" SOLO en entornos de laboratorio local.
-# Por defecto: false (seguro para producción — bloquea 10.x, 192.168.x, 127.x, etc.)
+# ── Control de acceso (ver security.py) ──────────────────────────────────────
+# Token de la API (≥ 16 caracteres). Opcional en 127.0.0.1: se genera uno
+# aleatorio y se imprime una URL de acceso al arrancar. OBLIGATORIO en otra interfaz.
+LUKITA_API_TOKEN=
+LUKITA_HOST=127.0.0.1           # interfaz en la que escucha run.py
+LUKITA_PORT=8000
+LUKITA_ALLOWED_HOSTS=           # Hosts permitidos (defecto 127.0.0.1,localhost,::1)
+LUKITA_ENABLE_ADMIN=false       # /api/admin/* solo existe si es true
+LUKITA_RATE_LIMIT=120           # peticiones /api/ por cliente y minuto
+LUKITA_MAX_BODY_BYTES=5242880
+
+# ── Límites (operaciones simultáneas; el exceso recibe HTTP 429) ─────────────
+LUKITA_MAX_SCANS=2
+LUKITA_MAX_NMAP=1
+LUKITA_MAX_SCREENSHOTS=2
+LUKITA_MAX_AUDITS=2
+LUKITA_MAX_SSL=2
+
+# ── SSRF ─────────────────────────────────────────────────────────────────────
+# Permite escanear IPs privadas/internas. "true" SOLO en laboratorios locales.
 ALLOW_PRIVATE_IPS=false
 
-# ── Servidor ──────────────────────────────────────────────────────────────────
-HOST=0.0.0.0
-PORT=8000
+# ── GeoIP (desactivada por defecto; solo ficheros locales GeoLite2) ──────────
+LUKITA_GEOIP_DB=                # p. ej. ./data/GeoLite2-City.mmdb
+LUKITA_GEOIP_ASN_DB=            # GeoLite2-ASN.mmdb opcional
 
-# ── Logs ──────────────────────────────────────────────────────────────────────
-# DEBUG | INFO | WARNING | ERROR
+# ── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL=INFO
-
-# ── API NVD (opcional — aumenta los límites de tasa para CVEs) ────────────────
-# Obtén una clave gratuita en https://nvd.nist.gov/developers/request-an-api-key
-NVD_API_KEY=
-
-# ── Ruta de la base de datos GeoIP ───────────────────────────────────────────
-GEOIP_DB_PATH=./data/GeoLite2-City.mmdb
 ```
 
 ### ALLOW_PRIVATE_IPS — Protección contra SSRF
@@ -720,21 +704,17 @@ La verificación SSRF se ejecuta **después de la resolución DNS** para defende
 
 ## Ejecución
 
-### Desarrollo
-
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python run.py
 ```
 
-### Producción
+`run.py` escucha en `127.0.0.1:8000` por defecto e imprime una URL de acceso
+con un token generado en cada arranque (`http://127.0.0.1:8000/#token=…`), salvo que esté definido
+`LUKITA_API_TOKEN`, en cuyo caso la interfaz pide el token. Se niega a
+escuchar en cualquier otra interfaz (`LUKITA_HOST=0.0.0.0`, una IP de la
+LAN…) sin `LUKITA_API_TOKEN`. Siempre usa un único worker.
 
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
-# Nota: usa workers=1 — el motor de escaneo mantiene estado por proceso.
-# Para escalado horizontal, pon un proxy inverso delante.
-```
-
-Abre `http://localhost:8000` en tu navegador.
+Los clientes de la API pueden autenticarse con `Authorization: Bearer <token>`.
 
 ---
 
@@ -905,44 +885,15 @@ Todas las exportaciones del lado cliente usan `yieldToMain()` (setTimeout 0 ms) 
 
 ## Docker
 
-```yaml
-# docker-compose.yml
-version: "3.9"
-services:
-  lukitaport:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - ALLOW_PRIVATE_IPS=false
-      - LOG_LEVEL=INFO
-      - NVD_API_KEY=${NVD_API_KEY}
-    volumes:
-      - ./data:/app/data          # Base de datos GeoIP
-    restart: unless-stopped
-```
-
-```dockerfile
-# Dockerfile
-FROM python:3.12-slim
-
-RUN apt-get update && apt-get install -y nmap && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-RUN playwright install chromium --with-deps
-
-COPY . .
-
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
 ```bash
+export LUKITA_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 docker compose up --build
 ```
+
+Después abre `http://127.0.0.1:8000` e introduce el token. El compose publica
+el puerto solo en `127.0.0.1`, se niega a arrancar sin `LUKITA_API_TOKEN` y
+ejecuta la app con un usuario sin privilegios, sin capabilities, con sistema
+de ficheros de solo lectura y `no-new-privileges`.
 
 ---
 
