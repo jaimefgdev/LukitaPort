@@ -11,10 +11,14 @@ SSL/TLS certificate and cipher-suite analyser with:
 
 from __future__ import annotations
 
+import ipaddress
 import ssl
 import socket
 from datetime import datetime, timezone
 from typing import Optional
+
+from cryptography import x509
+from cryptography.x509.oid import NameOID
 
 from logging_config import get_logger
 
@@ -62,16 +66,63 @@ _WEAK_CIPHER_LABELS: dict[str, str] = {
 # Internal helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _parse_cert_name(rdns: tuple) -> dict[str, str]:
+# Attribute names match the keys ``ssl.SSLSocket.getpeercert()`` used to
+# produce, which the frontend and report generators rely on.
+_NAME_ATTRS: dict[x509.ObjectIdentifier, str] = {
+    NameOID.COMMON_NAME:              "commonName",
+    NameOID.ORGANIZATION_NAME:        "organizationName",
+    NameOID.ORGANIZATIONAL_UNIT_NAME: "organizationalUnitName",
+    NameOID.COUNTRY_NAME:             "countryName",
+    NameOID.STATE_OR_PROVINCE_NAME:   "stateOrProvinceName",
+    NameOID.LOCALITY_NAME:            "localityName",
+    NameOID.EMAIL_ADDRESS:            "emailAddress",
+}
+
+
+def _parse_cert_name(name: x509.Name) -> dict[str, str]:
     result: dict[str, str] = {}
-    for rdn in rdns:
-        for key, value in rdn:
-            result[key] = value
+    for attr in name:
+        key = _NAME_ATTRS.get(attr.oid, attr.oid.dotted_string)
+        value = attr.value
+        result[key] = value if isinstance(value, str) else value.hex()
     return result
 
 
-def _parse_san(cert: dict) -> list[str]:
-    return [val for kind, val in cert.get("subjectAltName", ()) if kind == "DNS"]
+def _parse_san(cert: x509.Certificate) -> list[str]:
+    try:
+        ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+    except x509.ExtensionNotFound:
+        return []
+    return ext.value.get_values_for_type(x509.DNSName)
+
+
+def _verify_chain(
+    hostname: str,
+    port: int,
+    timeout: float,
+    cafile: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    """
+    Perform a second handshake with full certificate verification.
+
+    Returns ``(trusted, reason)``.  ``trusted`` is True only when the chain
+    validates against the system trust store (or ``cafile``) and, for
+    hostname targets, the certificate matches the hostname.
+    """
+    ctx = ssl.create_default_context(cafile=cafile)
+    try:
+        ipaddress.ip_address(hostname)
+        ctx.check_hostname = False          # no hostname to match for IP targets
+    except ValueError:
+        pass
+    try:
+        with socket.create_connection((hostname, port), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=hostname):
+                return True, None
+    except ssl.SSLCertVerificationError as exc:
+        return False, exc.verify_message or str(exc)
+    except (ssl.SSLError, OSError) as exc:
+        return False, str(exc)
 
 
 def _days_until(dt: datetime) -> int:
@@ -204,12 +255,21 @@ def _compute_grade(result: dict) -> str:
 # Public interface
 # ──────────────────────────────────────────────────────────────────────────────
 
-def analyze_ssl(hostname: str, port: int = 443, timeout: float = 8.0) -> dict:
+def analyze_ssl(
+    hostname: str,
+    port: int = 443,
+    timeout: float = 8.0,
+    cafile: Optional[str] = None,
+) -> dict:
     """
     Perform a comprehensive TLS analysis of ``hostname:port``.
 
     This function is **synchronous** (blocking I/O).  The caller must run it
     in an executor to avoid blocking the asyncio event loop.
+
+    ``valid`` means a certificate was retrieved and parsed; ``trusted``
+    reports whether it also validates against the trust store (``cafile``
+    overrides the system store, mainly for tests).
 
     Returns a dict compatible with ``models.SSLResult``.
     """
@@ -217,6 +277,8 @@ def analyze_ssl(hostname: str, port: int = 443, timeout: float = 8.0) -> dict:
         "hostname":             hostname,
         "port":                 port,
         "valid":                False,
+        "trusted":              False,
+        "verify_error":         None,
         "error":                None,
         "subject":              {},
         "issuer":               {},
@@ -239,6 +301,9 @@ def analyze_ssl(hostname: str, port: int = 443, timeout: float = 8.0) -> dict:
     }
 
     # ── Primary handshake ─────────────────────────────────────────────────────
+    # Verification is disabled so we can inspect untrusted/expired certs.
+    # With CERT_NONE, getpeercert() returns an empty dict, so the DER form is
+    # requested and parsed with ``cryptography`` instead.
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode    = ssl.CERT_NONE
@@ -246,7 +311,7 @@ def analyze_ssl(hostname: str, port: int = 443, timeout: float = 8.0) -> dict:
     try:
         with socket.create_connection((hostname, port), timeout=timeout) as raw_sock:
             with ctx.wrap_socket(raw_sock, server_hostname=hostname) as tls_sock:
-                cert         = tls_sock.getpeercert()
+                der          = tls_sock.getpeercert(binary_form=True)
                 cipher_tuple = tls_sock.cipher()
                 protocol     = tls_sock.version()
     except socket.timeout:
@@ -262,32 +327,34 @@ def analyze_ssl(hostname: str, port: int = 443, timeout: float = 8.0) -> dict:
         result["error"] = str(exc)
         return result
 
-    if not cert:
+    if not der:
         result["error"] = "No certificate returned"
+        return result
+
+    try:
+        cert = x509.load_der_x509_certificate(der)
+    except ValueError as exc:
+        result["error"] = f"Unparseable certificate: {exc}"
         return result
 
     result["valid"] = True
 
     # ── Certificate fields ────────────────────────────────────────────────────
-    result["subject"] = _parse_cert_name(cert.get("subject", ()))
-    result["issuer"]  = _parse_cert_name(cert.get("issuer", ()))
+    result["subject"] = _parse_cert_name(cert.subject)
+    result["issuer"]  = _parse_cert_name(cert.issuer)
 
-    fmt = "%b %d %H:%M:%S %Y %Z"
-    try:
-        not_before = datetime.strptime(cert.get("notBefore", ""), fmt).replace(tzinfo=timezone.utc)
-        not_after  = datetime.strptime(cert.get("notAfter",  ""), fmt).replace(tzinfo=timezone.utc)
-        result["not_before"] = not_before.isoformat()
-        result["not_after"]  = not_after.isoformat()
-        days = _days_until(not_after)
-        result["days_until_expiry"] = days
-        result["expired"]           = days < 0
-        result["expiring_soon"]     = 0 <= days < 30
-        if result["expired"]:
-            result["issues"].append("Certificate is EXPIRED")
-        elif result["expiring_soon"]:
-            result["issues"].append(f"Certificate expires in {days} days")
-    except ValueError:
-        pass
+    not_before = cert.not_valid_before_utc
+    not_after  = cert.not_valid_after_utc
+    result["not_before"] = not_before.isoformat()
+    result["not_after"]  = not_after.isoformat()
+    days = _days_until(not_after)
+    result["days_until_expiry"] = days
+    result["expired"]           = days < 0
+    result["expiring_soon"]     = 0 <= days < 30
+    if result["expired"]:
+        result["issues"].append("Certificate is EXPIRED")
+    elif result["expiring_soon"]:
+        result["issues"].append(f"Certificate expires in {days} days")
 
     result["sans"] = _parse_san(cert)
 
@@ -311,9 +378,17 @@ def analyze_ssl(hostname: str, port: int = 443, timeout: float = 8.0) -> dict:
             result["issues"].append(f"Deprecated protocol: {effective_proto}")
 
     # ── Self-signed ───────────────────────────────────────────────────────────
-    if result["subject"] == result["issuer"]:
+    if cert.subject == cert.issuer:
         result["self_signed"] = True
         result["issues"].append("Self-signed certificate")
+
+    # ── Chain / hostname verification ─────────────────────────────────────────
+    trusted, reason = _verify_chain(hostname, port, timeout, cafile)
+    result["trusted"]      = trusted
+    result["verify_error"] = reason
+    # Self-signed and expired certs are already reported above.
+    if not trusted and not result["self_signed"] and not result["expired"]:
+        result["issues"].append(f"Certificate not trusted: {reason}")
 
     # ── TLS version enumeration ───────────────────────────────────────────────
     try:
