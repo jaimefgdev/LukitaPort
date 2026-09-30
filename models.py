@@ -308,6 +308,8 @@ class SSLResult(BaseModel):
     hostname:            str
     port:                int
     valid:               bool
+    trusted:             bool                  = False
+    verify_error:        Optional[str]         = None
     error:               Optional[str]         = None
     subject:             dict[str, str]        = {}
     issuer:              dict[str, str]        = {}
