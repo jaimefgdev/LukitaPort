@@ -24,10 +24,6 @@ import { pollScreenshot, resetScreenshot } from './screenshot.js';
 
 export { cleanTarget };
 
-// ── Timeout constants (must match backend config) ─────────────────────────────
-const NMAP_BASE_TIMEOUT_SEC   = 20;
-const NMAP_PER_PORT_SEC       = 4;
-
 // ── AbortController manager ──────────────────────────────────────────────────
 // Categorized by action key.  Calling getController(key) aborts any previous
 // in-flight request for the same action before creating a new one.
@@ -299,7 +295,8 @@ export async function runFingerprint() {
     const target    = state.scanMeta?.input || state.scanMeta?.ip;
     if (!target || !openPorts.length) { btn.disabled = false; statusEl.textContent = ''; return; }
 
-    const dynamicTimeout = NMAP_BASE_TIMEOUT_SEC + NMAP_PER_PORT_SEC * openPorts.length;
+    // Same formula as the backend (values come from /api/config).
+    const dynamicTimeout = state.nmapTimeout.base + state.nmapTimeout.perPort * openPorts.length;
     const estMsg = state.lang === 'es'
         ? `⟳ Consultando nmap — estimado ~${dynamicTimeout}s...`
         : `⟳ Querying nmap — estimated ~${dynamicTimeout}s...`;
@@ -320,7 +317,11 @@ export async function runFingerprint() {
             { signal: ctrl.signal }
         );
         clearController('fingerprint');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        if (!resp.ok) {
+            // Errors use the common format {ok:false, error, detail}.
+            const body = await resp.json().catch(() => ({}));
+            throw new Error(body.detail || `HTTP ${resp.status}`);
+        }
         const data = await resp.json();
 
         if (data.error) {

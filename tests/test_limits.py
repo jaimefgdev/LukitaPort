@@ -9,7 +9,7 @@ import main
 
 
 def test_slot_limiter_counts():
-    lim = limits.SlotLimiter("x", "LUKITA_TEST_UNUSED", 2)
+    lim = limits.SlotLimiter("x", "max_scans")        # default 2
     assert lim.try_acquire() and lim.try_acquire()
     assert not lim.try_acquire()
     lim.release()
@@ -18,11 +18,17 @@ def test_slot_limiter_counts():
         lim.acquire()
 
 
-def test_slot_limit_from_env(monkeypatch):
-    monkeypatch.setenv("LUKITA_MAX_NMAP", "3")
+def test_slot_limit_from_env(setenv):
+    setenv(LUKITA_MAX_NMAP="3")
     assert limits.nmap.limit == 3
-    monkeypatch.setenv("LUKITA_MAX_NMAP", "garbage")
-    assert limits.nmap.limit == 1
+
+
+@pytest.mark.parametrize("value", ["garbage", "0", "-1"])
+def test_invalid_limit_fails_loudly(setenv, value):
+    import settings
+    setenv(LUKITA_MAX_NMAP=value)
+    with pytest.raises(settings.SettingsError, match="LUKITA_MAX_NMAP"):
+        _ = limits.nmap.limit
 
 
 def test_nmap_busy_returns_429(app_client, monkeypatch, allow_private):
@@ -50,7 +56,8 @@ def test_nmap_slot_released_after_run(app_client, monkeypatch, allow_private):
 def test_fingerprint_port_cap(app_client, allow_private):
     ports = ",".join(str(p) for p in range(1, limits.MAX_FINGERPRINT_PORTS + 2))
     resp = app_client.get("/api/fingerprint", params={"target": "127.0.0.1", "ports": ports})
-    assert resp.status_code == 400
+    assert resp.status_code == 422
+    assert "Too many ports" in resp.json()["detail"]
 
 
 def test_scan_busy_emits_429_event(app_client, allow_private):
@@ -68,7 +75,7 @@ def test_scan_releases_slot(app_client, monkeypatch, allow_private):
 
     monkeypatch.setattr(main, "scan_ports_stream", fake_stream)
     with app_client.stream("GET", "/api/scan", params={"target": "127.0.0.1"}) as resp:
-        lines = [l for l in resp.iter_lines() if l]
+        lines = [line for line in resp.iter_lines() if line]
     assert json.loads(lines[-1].removeprefix("data: "))["type"] == "done"
     assert limits.scans.in_use == 0
 

@@ -101,9 +101,11 @@ def _security_env(monkeypatch):
     import security
 
     for var in (
-        "LUKITA_HOST", "LUKITA_ENABLE_ADMIN", "LUKITA_RATE_LIMIT",
+        "LUKITA_HOST", "LUKITA_PORT", "LUKITA_ENABLE_ADMIN", "LUKITA_RATE_LIMIT",
         "LUKITA_MAX_BODY_BYTES", "LUKITA_GEOIP_DB", "LUKITA_GEOIP_ASN_DB",
-        "ALLOW_PRIVATE_IPS",
+        "LUKITA_MAX_SCANS", "LUKITA_MAX_NMAP", "LUKITA_MAX_SCREENSHOTS",
+        "LUKITA_MAX_AUDITS", "LUKITA_MAX_SSL", "ALLOW_PRIVATE_IPS",
+        "NVD_API_KEY", "LOG_LEVEL",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("LUKITA_API_TOKEN", TEST_TOKEN)
@@ -116,9 +118,24 @@ def _security_env(monkeypatch):
 
 
 @pytest.fixture
-def allow_private(monkeypatch):
+def setenv(monkeypatch):
+    """Set environment variables and reload the cached settings."""
+    import security
+
+    def _set(**values):
+        for key, value in values.items():
+            if value is None:
+                monkeypatch.delenv(key, raising=False)
+            else:
+                monkeypatch.setenv(key, value)
+        security.reset_settings()
+    return _set
+
+
+@pytest.fixture
+def allow_private(setenv):
     """Allow internal targets (needed to point the API at 127.0.0.1)."""
-    monkeypatch.setenv("ALLOW_PRIVATE_IPS", "true")
+    setenv(ALLOW_PRIVATE_IPS="true")
 
 
 def _make_client(monkeypatch, headers):

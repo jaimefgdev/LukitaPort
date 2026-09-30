@@ -1,19 +1,30 @@
+"""
+pdf_generator.py
+────────────────
+ReportLab PDF report.  Every dynamic value is escaped with ``_esc`` because
+Paragraph text is parsed as markup.
+"""
+
 import io
-from xml.sax.saxutils import escape as xml_escape
 from datetime import datetime
 from typing import Optional
+from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    HRFlowable, KeepTogether, Image,
+    HRFlowable, Image,
 )
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
 
-C_BG     = colors.HexColor("#050505")
+from config import port_risk
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 C_CARD   = colors.HexColor("#0f0f0f")
 C_ACCENT = colors.HexColor("#ff0033")
 C_GREEN  = colors.HexColor("#00cc66")
@@ -40,7 +51,7 @@ def make_styles():
     return styles
 
 
-def _esc(value) -> str:  # noqa: ANN001
+def _esc(value) -> str:
     """
     Escape a value for ReportLab ``Paragraph`` markup.
 
@@ -59,7 +70,6 @@ def _state_color(state: str) -> colors.Color:
     return {"open": C_GREEN, "closed": C_RED, "filtered": C_YELLOW}.get(state, C_MUTED)
 
 
-from config import PORT_RISK
 
 def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_png: Optional[bytes] = None) -> bytes:
     buf = io.BytesIO()
@@ -83,8 +93,8 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
             story.append(Paragraph("WEB SCREENSHOT", styles["section"]))
             story.append(img)
             story.append(Spacer(1, 10))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("pdf_screenshot_skipped", error=str(exc))
 
     story.append(Paragraph("SCAN METADATA", styles["section"]))
     target_info = meta.get("target", {}) or {}
@@ -150,9 +160,9 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
 
     open_results = [r for r in results if r.get("state") == "open"]
     if open_results:
-        high_n = sum(1 for r in open_results if PORT_RISK.get(r.get("port"), "info") == "high")
-        med_n  = sum(1 for r in open_results if PORT_RISK.get(r.get("port"), "info") == "medium")
-        low_n  = sum(1 for r in open_results if PORT_RISK.get(r.get("port"), "info") == "low")
+        high_n = sum(1 for r in open_results if port_risk(r.get("port")) == "high")
+        med_n  = sum(1 for r in open_results if port_risk(r.get("port")) == "medium")
+        low_n  = sum(1 for r in open_results if port_risk(r.get("port")) == "low")
         risk_rows = [[
             Paragraph(f"● HIGH RISK: {high_n} ports",   ParagraphStyle("rh", fontName="Courier-Bold", fontSize=8, textColor=C_ACCENT)),
             Paragraph(f"● MEDIUM RISK: {med_n} ports",  ParagraphStyle("rm", fontName="Courier-Bold", fontSize=8, textColor=C_YELLOW)),
@@ -189,8 +199,8 @@ def generate_pdf(scan_data: dict, audit_data: Optional[dict] = None, screenshot_
     for r in results:
         port    = r.get("port", "")
         state   = r.get("state", "")
-        risk    = PORT_RISK.get(port, "info") if state == "open" else "info"
-        version = str((r.get("version") or r.get("banner") or ""))[:40]
+        risk    = port_risk(port) if state == "open" else "info"
+        version = str(r.get("version") or r.get("banner") or "")[:40]
         rows.append([
             Paragraph(_esc(port), styles["mono"]),
             Paragraph(_esc(state_map.get(state, state)), ParagraphStyle("s",  fontName="Courier-Bold", fontSize=7.5, textColor=_state_color(state))),

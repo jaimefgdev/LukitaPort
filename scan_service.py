@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import re
 import shutil
 import socket
@@ -37,12 +38,12 @@ import geoip
 import limits
 import safe_http
 from cache import screenshot_cache
-from config import PORT_RISK
+from config import port_risk
 from logging_config import get_logger
 
 if TYPE_CHECKING:
     # Avoid a hard import of playwright at module level; it may not be installed.
-    from playwright.async_api import Browser  # type: ignore[import]
+    from playwright.async_api import Browser
 
 logger = get_logger(__name__)
 
@@ -55,10 +56,10 @@ logger = get_logger(__name__)
 # per server process instead of once per screenshot request.
 # ──────────────────────────────────────────────────────────────────────────────
 
-_browser: Optional["Browser"] = None
+_browser: Optional[Browser] = None
 
 
-def set_browser(browser: "Browser") -> None:
+def set_browser(browser: Browser) -> None:
     """
     Register a live Playwright ``Browser`` instance.
 
@@ -68,6 +69,16 @@ def set_browser(browser: "Browser") -> None:
     global _browser
     _browser = browser
     logger.info("playwright_browser_registered")
+
+
+def browser_ready() -> bool:
+    return _browser is not None
+
+
+def screenshots_supported() -> bool:
+    """True when Playwright is installed (the lite Docker image omits it)."""
+    import importlib.util
+    return _browser is not None or importlib.util.find_spec("playwright") is not None
 
 
 def clear_browser() -> None:
@@ -122,7 +133,7 @@ async def _terminate(proc: asyncio.subprocess.Process, grace: float = _TERMINATE
     try:
         await asyncio.wait_for(proc.wait(), grace)
         return
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     try:
         proc.kill()
@@ -160,7 +171,7 @@ async def _ping_one(ip_str: str) -> Optional[dict]:
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await _terminate(proc)
             return None
     except asyncio.CancelledError:
@@ -222,7 +233,7 @@ async def enumerate_subdomains(domain: str) -> dict:
             if resp.status_code != 200:
                 return {"error": f"crt.sh returned {resp.status_code}", "subdomains": []}
             data = resp.json()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"error": f"crt.sh unreachable: {exc}", "subdomains": []}
 
     seen:    set[str]   = set()
@@ -252,7 +263,7 @@ async def enumerate_subdomains(domain: str) -> dict:
         try:
             ip = await loop.run_in_executor(None, socket.gethostbyname, item["subdomain"])
             return {**item, "ip": ip, "resolves": True}
-        except Exception:  # noqa: BLE001
+        except Exception:
             return {**item, "ip": None, "resolves": False}
 
     top  = results[:50]
@@ -272,8 +283,8 @@ async def enumerate_subdomains(domain: str) -> dict:
 # nmap fingerprinting
 # ──────────────────────────────────────────────────────────────────────────────
 
-_NMAP_TIMEOUT_BASE     = 20
-_NMAP_TIMEOUT_PER_PORT = 4
+NMAP_TIMEOUT_BASE     = 20      # seconds; also exposed to the UI via /api/config
+NMAP_TIMEOUT_PER_PORT = 4
 
 
 def find_nmap() -> Optional[str]:
@@ -282,7 +293,6 @@ def find_nmap() -> Optional[str]:
     if path:
         return path
     if sys.platform == "win32":
-        import os
         for candidate in (
             r"C:\Program Files (x86)\Nmap\nmap.exe",
             r"C:\Program Files\Nmap\nmap.exe",
@@ -332,7 +342,7 @@ async def run_nmap(ip: str, ports_str: str, timeout_seconds: int) -> dict:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout_seconds + 10
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await _terminate(proc)
             logger.warning("nmap_timeout", ip=ip)
             return {"_error": "nmap_timeout"}
@@ -340,7 +350,7 @@ async def run_nmap(ip: str, ports_str: str, timeout_seconds: int) -> dict:
         # Reap nmap, then propagate so FastAPI can finish the cancellation.
         await _cleanup_after_cancel(proc)
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("nmap_unexpected", ip=ip, error=str(exc))
         if proc is not None:
             await _terminate(proc)
@@ -360,7 +370,9 @@ async def run_nmap(ip: str, ports_str: str, timeout_seconds: int) -> dict:
 def _parse_nmap_xml(xml: str) -> dict:
     results: dict = {}
     try:
-        root = ET.fromstring(xml)
+        # Output of our own nmap process (remote data inside it is escaped by
+        # nmap); expat also refuses external entities and entity bombs.
+        root = ET.fromstring(xml)  # noqa: S314
         for host in root.findall("host"):
             for ports_el in host.findall("ports"):
                 for port_el in ports_el.findall("port"):
@@ -403,7 +415,7 @@ def _parse_nmap_xml(xml: str) -> dict:
 
 def nmap_timeout(port_count: int) -> int:
     """Return a sensible nmap wall-clock timeout in seconds for ``port_count`` ports."""
-    return _NMAP_TIMEOUT_BASE + _NMAP_TIMEOUT_PER_PORT * port_count
+    return NMAP_TIMEOUT_BASE + NMAP_TIMEOUT_PER_PORT * port_count
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -458,13 +470,13 @@ class _RouteProxy:
     requests are aborted, so Chromium can never reach an internal address.
     """
 
-    def __init__(self, client, pins: dict[str, str]) -> None:  # noqa: ANN001
+    def __init__(self, client, pins: dict[str, str]) -> None:
         self.client   = client
         self.pins     = pins
         self.requests = 0
         self.blocked  = 0
 
-    async def __call__(self, route, request) -> None:  # noqa: ANN001
+    async def __call__(self, route, request) -> None:
         self.requests += 1
         if self.requests > SCREENSHOT_MAX_REQUESTS:
             await route.abort("blockedbyclient")
@@ -490,7 +502,7 @@ class _RouteProxy:
             logger.warning("screenshot_request_blocked", url=request.url, reason=str(exc))
             await route.abort("blockedbyclient")
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("screenshot_request_failed", url=request.url, error=str(exc))
             await route.abort("failed")
             return
@@ -530,7 +542,7 @@ async def take_screenshot(hostname: str, ip: str, port: int) -> None:
         limits.screenshots.release()
 
 
-async def _capture(browser, hostname: str, ip: str, url: str, mode: str) -> None:  # noqa: ANN001
+async def _capture(browser, hostname: str, ip: str, url: str, mode: str) -> None:
     context = None
     client  = safe_http.make_client(timeout=8.0)
     proxy   = _RouteProxy(client, {hostname: ip})
@@ -554,15 +566,15 @@ async def _capture(browser, hostname: str, ip: str, url: str, mode: str) -> None
                 "screenshot_done", target=hostname, bytes=len(png), mode=mode,
                 requests=proxy.requests, blocked=proxy.blocked,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("screenshot_page_error", target=hostname, url=url, error=str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("screenshot_context_error", target=hostname, error=str(exc))
     finally:
         if context is not None:
             try:
                 await context.close()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("screenshot_context_close_error", error=str(exc))
         await client.aclose()
 
@@ -575,7 +587,7 @@ async def _screenshot_launch_browser(hostname: str, ip: str, url: str) -> None:
     or unit tests that skip the lifespan).
     """
     try:
-        from playwright.async_api import async_playwright  # type: ignore[import]
+        from playwright.async_api import async_playwright
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True, args=BROWSER_ARGS)
             try:
@@ -584,7 +596,7 @@ async def _screenshot_launch_browser(hostname: str, ip: str, url: str) -> None:
                 await browser.close()
     except ImportError:
         logger.warning("playwright_not_installed")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("screenshot_error", target=hostname, error=str(exc))
 
 
@@ -599,7 +611,7 @@ _MD_ESCAPES = str.maketrans({
 })
 
 
-def _md(value) -> str:  # noqa: ANN001
+def _md(value) -> str:
     """
     Escape a value for inline Markdown / table cells.
 
@@ -666,7 +678,7 @@ def build_markdown_report(
         for r in open_ports:
             port    = r.get("port", "")
             service = r.get("service", "")
-            risk    = PORT_RISK.get(port, "info").upper()
+            risk    = port_risk(port).upper()
             resp    = r.get("response_time_ms", "—")
             version = r.get("version") or r.get("banner") or ""
             lines.append(
@@ -674,8 +686,9 @@ def build_markdown_report(
             )
         lines.append("")
 
-    high_n = sum(1 for r in open_ports if PORT_RISK.get(r.get("port"), "info") == "high")
-    med_n  = sum(1 for r in open_ports if PORT_RISK.get(r.get("port"), "info") == "medium")
+    risks  = [port_risk(r.get("port")) for r in open_ports]
+    high_n = risks.count("high")
+    med_n  = risks.count("medium")
     if high_n or med_n:
         lines += ["## Risk Assessment", ""]
         if high_n:
@@ -694,7 +707,7 @@ def build_markdown_report(
         port  = r.get("port", "")
         state = r.get("state", "")
         svc   = r.get("service", "")
-        risk  = PORT_RISK.get(port, "info").upper() if state == "open" else "—"
+        risk  = port_risk(port).upper() if state == "open" else "—"
         resp  = r.get("response_time_ms", "—")
         icon  = "🟢" if state == "open" else "🟡" if state == "filtered" else "🔴"
         lines.append(

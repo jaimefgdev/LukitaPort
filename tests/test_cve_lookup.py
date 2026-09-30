@@ -1,7 +1,7 @@
 """Point 19: NVD client — lock scope, Retry-After, cache, API key, CPE."""
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from email.utils import format_datetime
 
 import httpx
@@ -29,7 +29,6 @@ def fast_nvd(monkeypatch):
     monkeypatch.setattr(cve_lookup, "NVD_REQUEST_DELAY_KEY", 0.0)
     monkeypatch.setattr(cve_lookup, "_jittered_wait", lambda attempt: 0.01)
     monkeypatch.setattr(cve_lookup, "_last_request_time", 0.0)
-    monkeypatch.delenv("NVD_API_KEY", raising=False)
     cve_lookup._cache.clear()
 
 
@@ -77,8 +76,8 @@ def test_cpe_to_23(cpe, expected):
     assert cve_lookup.cpe_to_23(cpe) == expected
 
 
-async def test_api_key_header(nvd, monkeypatch):
-    monkeypatch.setenv("NVD_API_KEY", "k-123")
+async def test_api_key_header(nvd, setenv):
+    setenv(NVD_API_KEY="k-123")
     await cve_lookup.lookup_cves("x", "1")
     assert nvd["requests"][0].headers["apiKey"] == "k-123"
     assert cve_lookup._request_delay() == cve_lookup.NVD_REQUEST_DELAY_KEY
@@ -139,7 +138,7 @@ async def test_backoff_does_not_hold_the_lock(nvd, monkeypatch):
 
 
 def test_retry_after_parsing():
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     assert cve_lookup.parse_retry_after("12", now) == 12.0
     assert cve_lookup.parse_retry_after(format_datetime(now + timedelta(seconds=30)), now) == 30.0
     assert cve_lookup.parse_retry_after(format_datetime(now - timedelta(seconds=30)), now) == 0.0
@@ -156,7 +155,7 @@ async def test_http_date_retry_after_is_used(nvd, monkeypatch):
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", spy)
-    future = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=20), usegmt=True)
+    future = format_datetime(datetime.now(UTC) + timedelta(seconds=20), usegmt=True)
     responses = iter([httpx.Response(429, headers={"Retry-After": future}),
                       httpx.Response(200, json=NVD_OK)])
     nvd["handler"] = lambda req: next(responses)

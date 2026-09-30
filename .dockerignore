@@ -1,0 +1,23 @@
+# Only what the image needs: *.py, tech_signatures.json, frontend/, requirements.txt
+.git
+.github
+.gitignore
+.dockerignore
+.env
+.env.*
+!.env.example
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+tests
+frontend/tests
+frontend/package.json
+requirements-dev.txt
+docker-compose.yml
+Dockerfile
+*.md
+LICENSE
