@@ -757,5 +757,5 @@ def build_markdown_report(
                 )
             lines.append("")
 
-    lines += ["---", "", "*LukitaPort · jaimefg1888 · For educational use only*"]
+    lines += ["---", "", "*LukitaPort · jaimefgdev · For educational use only*"]
     return "\n".join(lines)
