@@ -84,22 +84,40 @@ def write_pem(tmp: Path, stem: str, cert, key=None) -> tuple[Path, Path | None]:
 class LoopbackTLSServer:
     """Accepts connections on 127.0.0.1 and completes TLS handshakes."""
 
-    def __init__(self, cert_path: Path, key_path: Path) -> None:
+    def __init__(
+        self,
+        cert_path: Path,
+        key_path: Path,
+        *,
+        minimum_version: ssl.TLSVersion | None = None,
+        maximum_version: ssl.TLSVersion | None = None,
+        ciphers: str | None = None,
+    ) -> None:
         self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self._ctx.load_cert_chain(cert_path, key_path)
+        if ciphers:
+            self._ctx.set_ciphers(ciphers)
+        if minimum_version:
+            self._ctx.minimum_version = minimum_version
+        if maximum_version:
+            self._ctx.maximum_version = maximum_version
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(16)
+        self._sock.settimeout(0.1)          # lets the loop notice _stop quickly
         self.port = self._sock.getsockname()[1]
+        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
 
     def _serve(self) -> None:
-        while True:
+        while not self._stop.is_set():
             try:
                 conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
             except OSError:
                 return                      # listening socket closed
-            conn.settimeout(5)
+            conn.settimeout(1)
             try:
                 with self._ctx.wrap_socket(conn, server_side=True) as tls:
                     tls.recv(1)             # wait for the client to hang up
@@ -113,5 +131,6 @@ class LoopbackTLSServer:
         return self
 
     def __exit__(self, *exc) -> None:
-        self._sock.close()
+        self._stop.set()
         self._thread.join(timeout=5)
+        self._sock.close()

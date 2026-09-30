@@ -35,18 +35,42 @@ logger = get_logger(__name__)
 
 _SIG_FILE = Path(__file__).parent / "tech_signatures.json"
 
+def _compile(pattern: str, where: str) -> Optional[re.Pattern]:
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except (re.error, TypeError) as exc:
+        logger.warning("tech_signature_invalid_regex", where=where, pattern=pattern, error=str(exc))
+        return None
+
+
 def _load_signatures() -> list[dict]:
+    """
+    Load and pre-compile signatures.  Each entry gets ``_body`` (compiled
+    body regexes) and ``_headers`` (lower-cased header → compiled regex);
+    invalid patterns are logged and skipped instead of failing every audit.
+    """
     try:
         with _SIG_FILE.open(encoding="utf-8") as fh:
             data = json.load(fh)
-        logger.info("tech_signatures_loaded", count=len(data), path=str(_SIG_FILE))
-        return data
     except FileNotFoundError:
         logger.warning("tech_signatures_missing", path=str(_SIG_FILE))
         return []
     except json.JSONDecodeError as exc:
         logger.error("tech_signatures_invalid_json", error=str(exc))
         return []
+
+    compiled: list[dict] = []
+    for sig in data:
+        name = sig.get("name", "")
+        body = [c for c in (_compile(p, name) for p in sig.get("body", [])) if c]
+        headers = {
+            hk.lower(): c
+            for hk, hp in sig.get("headers", {}).items()
+            if (c := _compile(hp, f"{name}:{hk}"))
+        }
+        compiled.append({**sig, "_body": body, "_headers": headers})
+    logger.info("tech_signatures_loaded", count=len(compiled), path=str(_SIG_FILE))
+    return compiled
 
 
 TECH_SIGNATURES: list[dict] = _load_signatures()
@@ -111,12 +135,29 @@ async def _fetch(
 # Pre-fetch (single canonical request shared by all sub-audits)
 # ──────────────────────────────────────────────────────────────────────────────
 
+# (scheme, port) candidates in order of preference.
+_WEB_PORTS: tuple[tuple[str, int], ...] = (
+    ("https", 443), ("https", 8443), ("http", 80), ("http", 8080), ("http", 8888),
+)
+
+
+def _base_url(scheme: str, target: str, port: int) -> str:
+    host = f"[{target}]" if ":" in target else target
+    default = (scheme, port) in (("https", 443), ("http", 80))
+    return f"{scheme}://{host}" if default else f"{scheme}://{host}:{port}"
+
+
+def _candidate_base_urls(target: str, open_ports: list[int]) -> list[str]:
+    """
+    Base URLs to try, including the port when it is not the scheme default
+    (auditing ``http://target`` when only 8080 is open would hit port 80).
+    """
+    urls = [_base_url(scheme, target, port) for scheme, port in _WEB_PORTS if port in open_ports]
+    return urls or [_base_url("https", target, 443), _base_url("http", target, 80)]
+
+
 def _choose_base_url(target: str, open_ports: list[int]) -> str:
-    if 443 in open_ports or 8443 in open_ports:
-        return f"https://{target}"
-    if 80 in open_ports or 8080 in open_ports:
-        return f"http://{target}"
-    return f"https://{target}"
+    return _candidate_base_urls(target, open_ports)[0]
 
 
 async def _prefetch(
@@ -124,12 +165,12 @@ async def _prefetch(
     open_ports: list[int],
     client: _AuditSession,
 ) -> tuple[str, Optional[tuple[int, dict[str, str], str]]]:
-    base_url = _choose_base_url(target, open_ports)
-    result   = await _fetch(client, base_url)
-    if result is None and base_url.startswith("https://"):
-        base_url = f"http://{target}"
-        result   = await _fetch(client, base_url)
-    return base_url, result
+    candidates = _candidate_base_urls(target, open_ports)
+    for base_url in candidates:
+        result = await _fetch(client, base_url)
+        if result is not None:
+            return base_url, result
+    return candidates[0], None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -330,17 +371,14 @@ async def _detect_technologies_from_prefetch(
         if name in detected_names:
             continue
 
-        # Body patterns
-        found = any(
-            re.search(pat, full_body, re.IGNORECASE)
-            for pat in sig.get("body", [])
-        )
+        # Body patterns (pre-compiled at load time)
+        found = any(rx.search(full_body) for rx in sig.get("_body", []))
 
         # Header patterns
         if not found:
-            for hk, hp in sig.get("headers", {}).items():
-                hv = headers_norm.get(hk.lower(), "")
-                if hv and re.search(hp, hv, re.IGNORECASE):
+            for hk, rx in sig.get("_headers", {}).items():
+                hv = headers_norm.get(hk, "")
+                if hv and rx.search(hv):
                     found = True
                     break
 

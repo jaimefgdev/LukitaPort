@@ -474,3 +474,10 @@ footer a:hover { color: var(--accent); }
 }
 .btn-cve-launch:hover { border-color: #ff0033 !important; color: #ff0033 !important; }
 .discover-host-card:hover { border-color: rgba(0, 255, 136, .5) !important; }
+
+/* ── Modo sigiloso (lento) ──────────────────────────────────────────────────── */
+.slow-note {
+    margin: -4px 0 12px; font-family: var(--font-mono); font-size: 10px;
+    color: #888; line-height: 1.6;
+}
+.slow-note strong { color: #ffaa00; }

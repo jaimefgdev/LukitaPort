@@ -104,22 +104,46 @@ async def fetch_geoip(ip: str) -> dict:
 _IS_WINDOWS = sys.platform == "win32"
 
 
-def _kill_proc(proc: asyncio.subprocess.Process) -> None:
-    """Terminate → kill, silently ignoring ProcessLookupError."""
+_TERMINATE_GRACE = 2.0
+
+
+async def _terminate(proc: asyncio.subprocess.Process, grace: float = _TERMINATE_GRACE) -> None:
+    """
+    Stop ``proc`` and reap it: SIGTERM, wait up to ``grace`` seconds, then
+    SIGKILL and wait.  Waiting is what prevents zombie processes.  Safe to
+    call on a process that already exited.
+    """
+    if proc.returncode is not None:
+        return
     try:
         proc.terminate()
     except ProcessLookupError:
-        return
-    except Exception:  # noqa: BLE001
         pass
+    try:
+        await asyncio.wait_for(proc.wait(), grace)
+        return
+    except asyncio.TimeoutError:
+        pass
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    await proc.wait()
+
+
+async def _cleanup_after_cancel(proc: Optional[asyncio.subprocess.Process]) -> None:
+    """Reap ``proc`` even though the current task is being cancelled."""
+    if proc is not None:
+        await asyncio.shield(_terminate(proc))
 
 
 async def _ping_one(ip_str: str) -> Optional[dict]:
     """
     Ping a single IP address.
 
-    Guarantees subprocess cleanup on timeout, CancelledError, and any
-    unexpected exception.  Returns None when the host is unreachable.
+    The subprocess is always reaped (timeout, error or cancellation) and
+    ``CancelledError`` is re-raised so callers can actually cancel a sweep.
+    Returns None when the host is unreachable.
     """
     args = (
         ["ping", "-n", "1", "-w", "800", ip_str]
@@ -136,24 +160,27 @@ async def _ping_one(ip_str: str) -> Optional[dict]:
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            _kill_proc(proc)
+        except asyncio.TimeoutError:
+            await _terminate(proc)
             return None
-
-        if proc.returncode == 0:
-            output = stdout.decode("utf-8", errors="replace")
-            rtt: Optional[float] = None
-            for pattern in (r"time[<=](\d+\.?\d*)\s*ms", r"Average\s*=\s*(\d+)ms"):
-                m = re.search(pattern, output, re.IGNORECASE)
-                if m:
-                    rtt = float(m.group(1))
-                    break
-            return {"ip": ip_str, "alive": True, "rtt_ms": rtt}
-
-    except (OSError, Exception) as exc:  # noqa: BLE001
+    except asyncio.CancelledError:
+        await _cleanup_after_cancel(proc)
+        raise
+    except OSError as exc:
         logger.debug("ping_error", ip=ip_str, error=str(exc))
-        if proc:
-            _kill_proc(proc)
+        if proc is not None:
+            await _terminate(proc)
+        return None
+
+    if proc.returncode == 0:
+        output = stdout.decode("utf-8", errors="replace")
+        rtt: Optional[float] = None
+        for pattern in (r"time[<=](\d+\.?\d*)\s*ms", r"Average\s*=\s*(\d+)ms"):
+            m = re.search(pattern, output, re.IGNORECASE)
+            if m:
+                rtt = float(m.group(1))
+                break
+        return {"ip": ip_str, "alive": True, "rtt_ms": rtt}
     return None
 
 
@@ -221,7 +248,7 @@ async def enumerate_subdomains(domain: str) -> dict:
     results.sort(key=lambda x: x["subdomain"])
 
     async def resolve_sub(item: dict) -> dict:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             ip = await loop.run_in_executor(None, socket.gethostbyname, item["subdomain"])
             return {**item, "ip": ip, "resolves": True}
@@ -272,8 +299,8 @@ async def run_nmap(ip: str, ports_str: str, timeout_seconds: int) -> dict:
 
     Error handling
     ──────────────
-    • asyncio.TimeoutError  → terminate → kill → return ``{"_error": "nmap_timeout"}``
-    • asyncio.CancelledError → terminate → kill → **re-raise** (FastAPI handles it)
+    • asyncio.TimeoutError  → terminate → wait → kill → return ``{"_error": "nmap_timeout"}``
+    • asyncio.CancelledError → terminate → wait → kill → **re-raise** (FastAPI handles it)
     • Other exceptions      → logged, returned as ``{"_error": "<msg>"}``
     """
     nmap_bin = find_nmap()
@@ -306,30 +333,28 @@ async def run_nmap(ip: str, ports_str: str, timeout_seconds: int) -> dict:
                 proc.communicate(), timeout=timeout_seconds + 10
             )
         except asyncio.TimeoutError:
-            _kill_proc(proc)
+            await _terminate(proc)
             logger.warning("nmap_timeout", ip=ip)
             return {"_error": "nmap_timeout"}
-        except asyncio.CancelledError:
-            _kill_proc(proc)
-            raise  # propagate so FastAPI can send a proper cancellation response
-
-        if proc.returncode != 0 and not stdout:
-            err = stderr.decode("utf-8", errors="replace")[:200]
-            if "nmap" in err.lower() or "command not found" in err.lower():
-                return {"_error": "nmap_not_installed"}
-            return {"_error": err or "nmap error"}
-
-        result = _parse_nmap_xml(stdout.decode("utf-8", errors="replace"))
-        logger.info("nmap_done", ip=ip, ports_detected=len(result))
-        return result
-
     except asyncio.CancelledError:
-        if proc:
-            _kill_proc(proc)
+        # Reap nmap, then propagate so FastAPI can finish the cancellation.
+        await _cleanup_after_cancel(proc)
         raise
     except Exception as exc:  # noqa: BLE001
         logger.error("nmap_unexpected", ip=ip, error=str(exc))
+        if proc is not None:
+            await _terminate(proc)
         return {"_error": str(exc)}
+
+    if proc.returncode != 0 and not stdout:
+        err = stderr.decode("utf-8", errors="replace")[:200]
+        if "nmap" in err.lower() or "command not found" in err.lower():
+            return {"_error": "nmap_not_installed"}
+        return {"_error": err or "nmap error"}
+
+    result = _parse_nmap_xml(stdout.decode("utf-8", errors="replace"))
+    logger.info("nmap_done", ip=ip, ports_detected=len(result))
+    return result
 
 
 def _parse_nmap_xml(xml: str) -> dict:

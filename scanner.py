@@ -1,7 +1,37 @@
+"""
+scanner.py
+──────────
+Async TCP connect scanner.
+
+Concurrency model
+─────────────────
+A fixed pool of worker tasks pulls ports from a queue and pushes results to
+another queue that ``scan_ports_stream`` yields from.  There is never one
+task per port, so a full 65 535-port scan costs ``max_concurrent`` tasks,
+not 65 535.  When the consumer stops iterating (client disconnect, error,
+``aclose()``) the ``finally`` block cancels and awaits every worker, so no
+probe keeps running in the background.
+
+Result states
+─────────────
+open      TCP handshake completed.
+closed    Connection refused (RST).
+filtered  Timeout, or host/network unreachable (ICMP) — like nmap.
+
+Local resource exhaustion (EMFILE/ENFILE/ENOBUFS) says nothing about the
+target, so it is never reported as a port state: the probe is retried with
+back-off and, if it keeps failing, the scan is aborted with
+``ScanResourceError``.  The effective concurrency is also capped by the
+process file-descriptor limit so this should not normally happen.
+"""
+
+from __future__ import annotations
+
 import asyncio
+import errno
+import random
 import socket
 from typing import AsyncGenerator, Optional
-
 
 COMMON_PORTS = [
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445,
@@ -20,11 +50,53 @@ SERVICE_MAP = {
     9200: "Elasticsearch", 27017: "MongoDB",
 }
 
-PROFILES = {
-    "stealth":    {"max_concurrent": 10,   "inter_delay": 0.5},
-    "normal":     {"max_concurrent": 100,  "inter_delay": 0.0},
-    "aggressive": {"max_concurrent": 1000, "inter_delay": 0.0},
+# ``jitter``: (min, max) seconds of random delay before each probe.
+# ``shuffle``: probe ports in random order.
+PROFILES: dict[str, dict] = {
+    "stealth":    {"max_concurrent": 10,   "inter_delay": 0.5, "jitter": None,       "shuffle": False},
+    "normal":     {"max_concurrent": 100,  "inter_delay": 0.0, "jitter": None,       "shuffle": False},
+    "aggressive": {"max_concurrent": 1000, "inter_delay": 0.0, "jitter": None,       "shuffle": False},
+    # Slow / low-profile mode.  NOT anonymous: the scanner's IP is still
+    # visible to the target.  It only lowers the rate, randomises the timing
+    # between probes and the port order, which makes simple threshold-based
+    # detection less likely.
+    "slow":       {"max_concurrent": 3,    "inter_delay": 0.0, "jitter": (0.5, 3.0), "shuffle": True},
 }
+
+# errno values meaning "the target (or the path to it) did not answer".
+_UNREACHABLE_ERRNOS = frozenset(
+    e for e in (
+        getattr(errno, "EHOSTUNREACH", None),
+        getattr(errno, "ENETUNREACH", None),
+        getattr(errno, "EHOSTDOWN", None),
+        getattr(errno, "ENETDOWN", None),
+        getattr(errno, "ETIMEDOUT", None),
+        getattr(errno, "EACCES", None),        # blocked by a local firewall rule
+        getattr(errno, "EPERM", None),
+    ) if e is not None
+)
+_REFUSED_ERRNOS = frozenset(
+    e for e in (
+        getattr(errno, "ECONNREFUSED", None),
+        getattr(errno, "ECONNRESET", None),
+    ) if e is not None
+)
+# errno values meaning *we* ran out of resources.
+_RESOURCE_ERRNOS = frozenset(
+    e for e in (
+        getattr(errno, "EMFILE", None),
+        getattr(errno, "ENFILE", None),
+        getattr(errno, "ENOBUFS", None),
+        getattr(errno, "EADDRNOTAVAIL", None),  # ephemeral ports exhausted
+    ) if e is not None
+)
+
+_RESOURCE_RETRIES = 5
+_FD_RESERVE       = 128      # descriptors kept free for the rest of the app
+
+
+class ScanResourceError(RuntimeError):
+    """The local machine ran out of sockets/descriptors; the scan stopped."""
 
 
 def get_service(port: int) -> str:
@@ -34,6 +106,22 @@ def get_service(port: int) -> str:
         return socket.getservbyport(port)
     except OSError:
         return "Unknown"
+
+
+def fd_budget() -> int:
+    """Max concurrent sockets allowed by the soft RLIMIT_NOFILE (≥ 1)."""
+    try:
+        import resource
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ImportError, ValueError, OSError):   # Windows / exotic platforms
+        return 500
+    if soft == resource.RLIM_INFINITY:
+        return 10_000
+    return max(1, soft - _FD_RESERVE)
+
+
+def effective_concurrency(requested: int) -> int:
+    return max(1, min(requested, fd_budget()))
 
 
 _BANNER_STRATEGY: dict[int, tuple[str, Optional[bytes]]] = {
@@ -79,42 +167,77 @@ async def _grab_banner(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         banner = " ".join(raw.decode("utf-8", errors="replace").strip().split())
         return banner[:120] if banner else None
 
-    except (asyncio.TimeoutError, OSError, Exception):
+    except (asyncio.TimeoutError, OSError):
         return None
 
 
 async def _scan_port_async(ip: str, port: int, timeout: float) -> dict:
+    """
+    Probe one port.  Raises ``OSError`` only for local resource errors
+    (see ``_RESOURCE_ERRNOS``); every target-related outcome is a state.
+    """
     result = {
         "port": port, "state": "closed", "service": get_service(port),
         "response_time_ms": None, "version": None, "banner": None,
     }
 
-    loop  = asyncio.get_event_loop()
+    loop  = asyncio.get_running_loop()
     start = loop.time()
+
+    def elapsed_ms() -> float:
+        return round((loop.time() - start) * 1000, 2)
 
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
-        result["state"]           = "open"
-        result["response_time_ms"] = round((loop.time() - start) * 1000, 2)
+    except asyncio.TimeoutError:
+        result["state"] = "filtered"
+        result["response_time_ms"] = elapsed_ms()
+        return result
+    except OSError as exc:
+        if exc.errno in _RESOURCE_ERRNOS:
+            raise
+        result["response_time_ms"] = elapsed_ms()
+        if isinstance(exc, ConnectionRefusedError) or exc.errno in _REFUSED_ERRNOS:
+            result["state"] = "closed"
+        else:
+            # Unreachable, or an unexpected error: we got no answer from the
+            # port, which is what "filtered" means.
+            result["state"] = "filtered"
+            if exc.errno not in _UNREACHABLE_ERRNOS:
+                result["error"] = errno.errorcode.get(exc.errno, str(exc))
+        return result
 
+    result["state"] = "open"
+    result["response_time_ms"] = elapsed_ms()
+    try:
         banner = await _grab_banner(reader, writer, port)
         if banner:
             result["banner"] = banner
-
+    finally:
         writer.close()
-        try: await writer.wait_closed()
-        except Exception: pass
-
-    except asyncio.TimeoutError:
-        result["state"]           = "filtered"
-        result["response_time_ms"] = round((loop.time() - start) * 1000, 2)
-    except ConnectionRefusedError:
-        result["state"]           = "closed"
-        result["response_time_ms"] = round((loop.time() - start) * 1000, 2)
-    except OSError:
-        result["state"] = "filtered"
-
+        try:
+            await writer.wait_closed()
+        except (OSError, asyncio.CancelledError):
+            pass
     return result
+
+
+async def _probe_with_retry(ip: str, port: int, timeout: float) -> dict:
+    delay = 0.05
+    for attempt in range(_RESOURCE_RETRIES + 1):
+        try:
+            return await _scan_port_async(ip, port, timeout)
+        except OSError as exc:
+            if exc.errno not in _RESOURCE_ERRNOS:
+                raise
+            if attempt == _RESOURCE_RETRIES:
+                raise ScanResourceError(
+                    f"Local resources exhausted ({errno.errorcode.get(exc.errno, exc.errno)}); "
+                    "lower the concurrency (profile) or raise the open-files limit."
+                ) from exc
+            await asyncio.sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 async def scan_ports_stream(
@@ -123,29 +246,62 @@ async def scan_ports_stream(
     timeout: float = 1.0,
     max_concurrent: int = 100,
     inter_delay: float = 0.0,
+    jitter: Optional[tuple[float, float]] = None,
+    shuffle: bool = False,
+    rng: Optional[random.Random] = None,
 ) -> AsyncGenerator[dict, None]:
-    total     = len(ports)
-    semaphore = asyncio.Semaphore(max_concurrent)
-    completed = 0
-    lock      = asyncio.Lock()
+    """
+    Yield one result dict per port, in completion order, with progress
+    fields.  Raises ``ScanResourceError`` if local resources run out.
+    """
+    total = len(ports)
+    if total == 0:
+        return
+    rng = rng or random.SystemRandom()
+    order = list(ports)
+    if shuffle:
+        rng.shuffle(order)
 
-    async def scan_with_sem(port: int) -> dict:
-        async with semaphore:
-            res = await _scan_port_async(ip, port, timeout)
+    port_queue: asyncio.Queue[int] = asyncio.Queue()
+    for p in order:
+        port_queue.put_nowait(p)
+    results: asyncio.Queue[dict | BaseException] = asyncio.Queue()
+
+    async def worker() -> None:
+        while True:
+            try:
+                port = port_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if jitter:
+                await asyncio.sleep(rng.uniform(*jitter))
+            try:
+                res = await _probe_with_retry(ip, port, timeout)
+            except Exception as exc:  # noqa: BLE001 — surfaced to the consumer
+                # A dead worker must never leave the consumer waiting forever.
+                await results.put(exc)
+                return
+            await results.put(res)
             if inter_delay > 0:
                 await asyncio.sleep(inter_delay)
-            return res
 
-    tasks = {asyncio.create_task(scan_with_sem(p)): p for p in ports}
-
-    for coro in asyncio.as_completed(tasks.keys()):
-        result = await coro
-        async with lock:
-            completed += 1
-            result["progress"] = round((completed / total) * 100, 1)
-            result["scanned"]  = completed
-            result["total"]    = total
-        yield result
+    workers = [
+        asyncio.create_task(worker())
+        for _ in range(min(effective_concurrency(max_concurrent), total))
+    ]
+    try:
+        for completed in range(1, total + 1):
+            item = await results.get()
+            if isinstance(item, BaseException):
+                raise item
+            item["progress"] = round((completed / total) * 100, 1)
+            item["scanned"]  = completed
+            item["total"]    = total
+            yield item
+    finally:
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
 
 def get_port_range(mode: str, port_start: int = None, port_end: int = None) -> list:
