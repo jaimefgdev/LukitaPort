@@ -35,12 +35,18 @@ Callers (main.py) must check for this sentinel and return HTTP 403.
 Design note — SSRF check happens AFTER DNS resolution
 ──────────────────────────────────────────────────────
 Checking the hostname string alone is insufficient.  An attacker can register
-"evil.example.com" whose A record resolves to "10.0.0.1".  By resolving first
-and then checking the IP we also defend against DNS-rebinding attacks.
+"evil.example.com" whose A record resolves to "10.0.0.1".  So every address
+the name resolves to is checked, and one of them is *pinned*: all later
+connections (scan, nmap, audit, TLS, screenshot) go to that IP, with the
+hostname sent only as Host header / SNI.  Resolving the name again later
+would reopen the door to DNS rebinding (the second answer could be internal).
+Redirects and page sub-resources are resolved and checked one by one
+(``resolve_pinned``).
 """
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 import socket
@@ -70,43 +76,25 @@ def _allow_private_ips() -> bool:
 
 def _is_internal_address(ip_str: str) -> bool:
     """
-    Return True if ``ip_str`` falls into any non-routable / internal range.
+    Return True if ``ip_str`` is not a globally routable unicast address.
 
-    Covers both IPv4 and IPv6.  The ``ipaddress`` stdlib correctly maps:
-
-      IPv4
-      ────
-      127.0.0.0/8     → loopback
-      10.0.0.0/8      ┐
-      172.16.0.0/12   ├ private (RFC 1918)
-      192.168.0.0/16  ┘
-      169.254.0.0/16  → link-local  (incl. 169.254.169.254 AWS metadata)
-      0.0.0.0/8       → unspecified
-      240.0.0.0/4     → reserved
-      224.0.0.0/4     → multicast
-
-      IPv6
-      ────
-      ::1             → loopback
-      fc00::/7        → unique local (private)
-      fe80::/10       → link-local
-      ff00::/8        → multicast
-      ::/128          → unspecified
+    Uses ``ipaddress``'s ``is_global`` (IANA special-purpose registries), so
+    besides loopback, RFC 1918, link-local (incl. 169.254.169.254 cloud
+    metadata), unspecified and reserved space it also covers CGNAT
+    (100.64/10), benchmarking, documentation and similar ranges.  Multicast
+    is blocked explicitly.  IPv4-mapped IPv6 (``::ffff:127.0.0.1``) is
+    unwrapped first so it cannot smuggle an internal IPv4 address.
     """
     try:
-        addr = ipaddress.ip_address(ip_str)
+        addr = ipaddress.ip_address(ip_str.split("%", 1)[0])
     except ValueError:
         # Cannot parse → fail closed (treat as blocked)
         return True
 
-    return (
-        addr.is_loopback
-        or addr.is_private
-        or addr.is_link_local
-        or addr.is_reserved
-        or addr.is_multicast
-        or addr.is_unspecified
-    )
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+
+    return (not addr.is_global) or addr.is_multicast
 
 
 def is_ssrf_blocked(ip_str: str) -> bool:
@@ -181,7 +169,7 @@ def resolve_target(target: str) -> dict:
         hostname: str | None = None
         try:
             hostname = socket.gethostbyaddr(target)[0]
-        except socket.herror:
+        except OSError:                      # herror / gaierror / timeout
             pass
 
         if is_ssrf_blocked(target):
@@ -197,6 +185,7 @@ def resolve_target(target: str) -> dict:
                 "hostname": hostname,
                 "resolved": False,
                 "error":    "ssrf_blocked",
+                "addresses": [target],
             }
 
         return {
@@ -205,40 +194,112 @@ def resolve_target(target: str) -> dict:
             "hostname": hostname,
             "resolved": False,
             "error":    None,
+            "addresses": [target],
         }
 
     # ── Branch B: hostname → DNS ──────────────────────────────────────────────
     try:
-        ip = socket.gethostbyname(target)
+        addresses = lookup_addresses(target)
     except socket.gaierror as exc:
         return {
-            "input":    target,
-            "ip":       None,
-            "hostname": None,
-            "resolved": False,
-            "error":    str(exc),
+            "input":     target,
+            "ip":        None,
+            "hostname":  None,
+            "resolved":  False,
+            "error":     str(exc),
+            "addresses": [],
+        }
+    if not addresses:
+        return {
+            "input":     target,
+            "ip":        None,
+            "hostname":  None,
+            "resolved":  False,
+            "error":     "no addresses found",
+            "addresses": [],
         }
 
-    # SSRF check on the *resolved* IP — catches DNS-rebinding
-    if is_ssrf_blocked(ip):
+    # Every returned address must pass: a hostname with one public and one
+    # internal record could otherwise reach the internal one later.  The
+    # first address is *pinned* — callers must connect to ``ip`` (sending
+    # the hostname only as Host/SNI) so DNS is never consulted again.
+    ip      = addresses[0]
+    blocked = [a for a in addresses if is_ssrf_blocked(a)]
+    if blocked:
         logger.warning(
             "ssrf_blocked",
             input=target,
-            ip=ip,
+            ip=blocked[0],
             allow_private=_allow_private_ips(),
         )
         return {
-            "input":    target,
-            "ip":       ip,
-            "hostname": target,
-            "resolved": True,
-            "error":    "ssrf_blocked",
+            "input":     target,
+            "ip":        blocked[0],
+            "hostname":  target,
+            "resolved":  True,
+            "error":     "ssrf_blocked",
+            "addresses": addresses,
         }
 
     return {
-        "input":    target,
-        "ip":       ip,
-        "hostname": target,
-        "resolved": True,
-        "error":    None,
+        "input":     target,
+        "ip":        ip,
+        "hostname":  target,
+        "resolved":  True,
+        "error":     None,
+        "addresses": addresses,
     }
+
+
+def lookup_addresses(host: str) -> list[str]:
+    """
+    Return every distinct address ``host`` resolves to (IPv4 and IPv6),
+    preserving resolver order.  Raises ``socket.gaierror`` on failure.
+    """
+    infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    seen: list[str] = []
+    for *_, sockaddr in infos:
+        addr = sockaddr[0]
+        if addr not in seen:
+            seen.append(addr)
+    return seen
+
+
+class BlockedDestination(Exception):
+    """A destination resolved to an address the SSRF policy forbids."""
+
+
+async def resolve_pinned(host: str) -> str:
+    """
+    Resolve ``host`` without blocking the event loop, validate *all* of its
+    addresses and return the one to connect to.
+
+    Raises ``BlockedDestination`` if any address is internal (and private
+    addresses are not allowed) or the name does not resolve.
+    """
+    host = host.strip("[]")
+    if is_valid_ip_any(host):
+        if is_ssrf_blocked(host):
+            raise BlockedDestination(f"{host} is an internal address")
+        return host
+    loop = asyncio.get_running_loop()
+    try:
+        addresses = await loop.run_in_executor(None, lookup_addresses, host)
+    except socket.gaierror as exc:
+        raise BlockedDestination(f"cannot resolve {host}: {exc}") from exc
+    if not addresses:
+        raise BlockedDestination(f"cannot resolve {host}")
+    for addr in addresses:
+        if is_ssrf_blocked(addr):
+            raise BlockedDestination(f"{host} resolves to internal address {addr}")
+    return addresses[0]
+
+
+def network_ssrf_blocked(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
+    """True when any address of ``network`` is internal and not allowed."""
+    if _allow_private_ips():
+        return False
+    return any(
+        _is_internal_address(str(a))
+        for a in (network.network_address, network.broadcast_address, *network.hosts())
+    )

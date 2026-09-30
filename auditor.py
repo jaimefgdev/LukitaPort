@@ -11,8 +11,9 @@ Key improvements over v1
 • Each sub-audit is fully type-annotated and returns dicts compatible with
   the Pydantic models in ``models.py``.
 • Structured logging replaces all print() calls.
-• httpx.AsyncClient is created once per ``run_full_audit`` call and shared
-  across all concurrent sub-tasks.
+• One HTTP session is created per ``run_full_audit`` call and shared across
+  all concurrent sub-tasks.  All requests go through ``safe_http`` (pinned
+  target IP, SSRF-checked redirects, bounded response size).
 """
 
 from __future__ import annotations
@@ -23,8 +24,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-import httpx
-
+import safe_http
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -60,29 +60,48 @@ def reload_signatures() -> int:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# HTTP client factory
+# HTTP session — SSRF-safe (see safe_http.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _make_client(timeout: float = 6.0) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        verify=False,
-        follow_redirects=True,
-        timeout=timeout,
-        headers={"User-Agent": "Mozilla/5.0 (LukitaPort Security Audit)"},
-        limits=httpx.Limits(max_connections=40, max_keepalive_connections=10),
-    )
+class _AuditSession:
+    """
+    Wraps an httpx client plus the host→IP pins for one audit.
+
+    The audit target is pinned to the IP validated by the API layer, so no
+    request of this audit re-resolves it; redirects to other hosts are
+    resolved and SSRF-checked hop by hop by ``safe_http.fetch``.
+    """
+
+    def __init__(self, pins: dict[str, str], timeout: float = 6.0) -> None:
+        self.pins   = pins
+        self.client = safe_http.make_client(timeout)
+
+    async def __aenter__(self) -> "_AuditSession":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.client.aclose()
+
+    async def get(
+        self, url: str, timeout: float = 6.0, max_redirects: int = 5,
+    ) -> safe_http.SafeResponse:
+        return await safe_http.fetch(
+            self.client, url, pinned=self.pins,
+            timeout=timeout, max_redirects=max_redirects,
+        )
 
 
 async def _fetch(
-    client: httpx.AsyncClient,
-    url:    str,
+    client:  _AuditSession,
+    url:     str,
     timeout: float = 6.0,
 ) -> Optional[tuple[int, dict[str, str], str]]:
     try:
         resp = await client.get(url, timeout=timeout)
-        return resp.status_code, dict(resp.headers), resp.text[:200_000]
-    except httpx.HTTPStatusError as exc:
-        return exc.response.status_code, dict(exc.response.headers), exc.response.text[:16_384]
+        return resp.status, dict(resp.headers), resp.text
+    except safe_http.BlockedDestination as exc:
+        logger.warning("fetch_blocked", url=url, reason=str(exc))
+        return None
     except Exception as exc:  # noqa: BLE001
         logger.debug("fetch_failed", url=url, error=str(exc))
         return None
@@ -103,7 +122,7 @@ def _choose_base_url(target: str, open_ports: list[int]) -> str:
 async def _prefetch(
     target: str,
     open_ports: list[int],
-    client: httpx.AsyncClient,
+    client: _AuditSession,
 ) -> tuple[str, Optional[tuple[int, dict[str, str], str]]]:
     base_url = _choose_base_url(target, open_ports)
     result   = await _fetch(client, base_url)
@@ -257,7 +276,7 @@ def _audit_headers_from_prefetch(
 async def _detect_technologies_from_prefetch(
     base_url: str,
     prefetch: Optional[tuple[int, dict[str, str], str]],
-    client:   httpx.AsyncClient,
+    client:   _AuditSession,
 ) -> dict:
     if prefetch is None:
         return {"error": "Could not connect", "url": base_url, "technologies": []}
@@ -394,15 +413,16 @@ SENSITIVE_PATHS: list[tuple[str, str, str, str]] = [
 
 async def _scan_sensitive_paths(
     base_url: str,
-    client:   httpx.AsyncClient,
+    client:   _AuditSession,
     timeout:  float = 4.0,
 ) -> dict:
     async def check_one(path_tuple: tuple[str, str, str, str]) -> Optional[dict]:
         path, label, severity, description = path_tuple
         url = base_url.rstrip("/") + path
         try:
-            resp = await client.get(url, timeout=timeout)
-            code = resp.status_code
+            # Redirects are reported as-is (not followed) for path probes.
+            resp = await client.get(url, timeout=timeout, max_redirects=0)
+            code = resp.status
             if code in (200, 301, 302, 403):
                 return {
                     "path":         path,
@@ -411,10 +431,12 @@ async def _scan_sensitive_paths(
                     "description":  description,
                     "status_code":  code,
                     "content_type": resp.headers.get("content-type", ""),
-                    "size_bytes":   len(resp.content),
-                    "url":          str(resp.url),
+                    "size_bytes":   len(resp.body),
+                    "url":          resp.url,
                     "accessible":   code == 200,
                 }
+        except safe_http.BlockedDestination as exc:
+            logger.warning("path_check_blocked", url=url, reason=str(exc))
         except Exception as exc:  # noqa: BLE001
             logger.debug("path_check_failed", url=url, error=str(exc))
         return None
@@ -461,14 +483,22 @@ async def _scan_sensitive_paths(
 # Public entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def run_full_audit(target: str, open_ports: list[int]) -> dict:
+async def run_full_audit(
+    target:     str,
+    open_ports: list[int],
+    pinned_ip:  Optional[str] = None,
+) -> dict:
     """
     Run all three audit modules concurrently against ``target``.
+
+    ``pinned_ip`` is the SSRF-validated address of ``target``; every request
+    to ``target`` connects there (``target`` is only sent as Host/SNI).
 
     Returns a dict with keys: ``headers``, ``technologies``, ``paths``.
     """
     logger.info("audit_start", target=target, open_ports=open_ports)
-    async with _make_client() as client:
+    pins = {target: pinned_ip} if pinned_ip else {}
+    async with _AuditSession(pins) as client:
         base_url, prefetch = await _prefetch(target, open_ports, client)
         headers_result = _audit_headers_from_prefetch(base_url, prefetch)
         tech_result, paths_result = await asyncio.gather(

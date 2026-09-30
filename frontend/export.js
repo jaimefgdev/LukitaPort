@@ -121,6 +121,19 @@ export async function exportJSON() {
  * Chunked: builds the rows string segment-by-segment so the join()
  * never operates on a single giant array in one shot.
  */
+/**
+ * csvField — quote a text value for CSV and neutralise spreadsheet formulas.
+ *
+ * Banners/versions come from the scanned host, so a value such as
+ * `=HYPERLINK(...)` must not be evaluated when the CSV is opened in a
+ * spreadsheet: values starting with = + - @ TAB or CR get a leading quote.
+ */
+export function csvField(value) {
+    let v = String(value ?? '');
+    if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;
+    return '"' + v.replace(/"/g, '""') + '"';
+}
+
 export async function exportCSV() {
     if (!state.results.length) return;
     const btn     = $('btn-csv');
@@ -138,11 +151,10 @@ export async function exportCSV() {
                 chunk.map(r => [
                     r.port,
                     r.state,
-                    // Wrap service/version in quotes to handle commas in banners
-                    '"' + (r.service || '').replace(/"/g, '""') + '"',
+                    csvField(r.service),
                     getRisk(r.port),
                     r.response_time_ms ?? '',
-                    '"' + (state.versions[r.port]?.version || '').replace(/"/g, '""') + '"',
+                    csvField(state.versions[r.port]?.version),
                 ].join(',')).join('\r\n')
             );
             if (i + EXPORT_CHUNK < results.length) {

@@ -36,11 +36,18 @@ def test_ipv6_is_rejected(app_client, swept, cidr):
     assert swept == []
 
 
+def test_internal_network_is_ssrf_blocked(app_client, swept):
+    resp = app_client.get("/api/discover", params={"cidr": "10.0.0.0/24"})
+    assert resp.status_code == 403
+    assert resp.json()["error"] == "ssrf_blocked"
+    assert swept == []
+
+
 def test_invalid_cidr(app_client, swept):
     assert app_client.get("/api/discover", params={"cidr": "nope"}).status_code == 400
 
 
-def test_widest_allowed_network_is_capped_by_max_hosts(app_client, swept):
+def test_widest_allowed_network_is_capped_by_max_hosts(app_client, swept, allow_private):
     resp = app_client.get("/api/discover", params={"cidr": "127.0.0.0/22", "max_hosts": 5})
     assert resp.status_code == 200
     assert resp.json()["total_hosts"] == 5
