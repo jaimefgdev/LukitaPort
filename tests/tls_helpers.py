@@ -50,6 +50,16 @@ def make_cert(
         .not_valid_after(not_after or now + timedelta(days=90))
         .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
     )
+    # RFC 5280 identifiers: Python ≥ 3.13 verifies with VERIFY_X509_STRICT,
+    # which rejects chains whose certificates lack them (real ones have them).
+    builder = builder.add_extension(
+        x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False,
+    )
+    if issuer_cert is not None:
+        builder = builder.add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key()),
+            critical=False,
+        )
     if sans:
         builder = builder.add_extension(
             x509.SubjectAlternativeName([x509.DNSName(s) for s in sans]), critical=False,

@@ -20,6 +20,8 @@ import { $, showToast, appendRow, renderTable, updateSummary, setDotBlink,
          flushAndDrain, escapeHTML }  from './ui.js';
 import { tmplDiscoverOutput, tmplSubdomainsOutput, tmplCVELoading } from './templates.js';
 import { cleanTarget, validatePortRange } from './utils.js';
+import { apiJSON, errorMessage, notifyUnauthorized } from './http.js';
+import { errorInfoFromSSE } from './errors.js';
 import { pollScreenshot, resetScreenshot } from './screenshot.js';
 
 export { cleanTarget };
@@ -164,19 +166,11 @@ export function startScan() {
         let d;
         try { d = JSON.parse(e.data); } catch { return; }
 
-        // ── SSRF error from backend ───────────────────────────────────────────
+        // ── Error event from the backend (SSRF block, busy, bad input…) ──────
         if (d.error) {
-            const statusCode = d.status || 0;
-            if (statusCode === 403 || d.error === 'ssrf_blocked') {
-                showError(
-                    state.lang === 'es'
-                        ? '⛔ Escaneo bloqueado — IP interna no permitida. Activa ALLOW_PRIVATE_IPS=true para redes privadas.'
-                        : '⛔ Scan blocked — internal IP not allowed. Set ALLOW_PRIVATE_IPS=true for private networks.'
-                );
-            } else {
-                showError(d.error);
-            }
-            stopScan();
+            const info = errorInfoFromSSE(d);
+            if (info.status === 401) notifyUnauthorized();
+            stopScan(false, errorMessage(info));
             return;
         }
 
@@ -211,10 +205,43 @@ export function startScan() {
         if (d.type === 'cancelled') stopScan(false);
     };
 
-    es.onerror = () => { if (state.scanning) stopScan(); };
+    // EventSource hides the HTTP status of a failed request (e.g. 401) and
+    // reconnects forever on network errors: close it, then find out why.
+    es.onerror = () => {
+        if (!state.scanning) return;
+        _destroyEventSource();
+        diagnoseStreamFailure().then(msg => stopScan(false, msg));
+    };
 }
 
-export function stopScan(completed = false) {
+/**
+ * diagnoseStreamFailure — explain why the scan stream failed.  EventSource
+ * gives no status code, so ask the server whether the session is still
+ * valid (401 → sign-in dialog) or whether it is reachable at all.
+ */
+async function diagnoseStreamFailure() {
+    try {
+        const resp = await fetch('/api/auth/status');
+        if (resp.ok && (await resp.json()).authenticated === false) {
+            notifyUnauthorized();
+            return errorMessage({ status: 401, code: 'unauthorized' });
+        }
+        if (!resp.ok) {
+            let body = null;
+            try { body = await resp.json(); } catch { /* not JSON */ }
+            return errorMessage({ status: resp.status, code: body?.error, detail: body?.detail });
+        }
+        return errorMessage({ status: 0, code: 'stream_lost' });
+    } catch {
+        return errorMessage({ status: 0, code: 'network' });
+    }
+}
+
+/**
+ * stopScan — end the current scan.  With `errorMsg`, the error is shown in
+ * the results table (and as a toast) instead of the "no results" message.
+ */
+export function stopScan(completed = false, errorMsg = null) {
     state.scanning = false;
 
     // Flush any rows that were queued but not yet rendered (last batch)
@@ -261,11 +288,10 @@ export function stopScan(completed = false) {
 
                 const firstWebPort     = webPorts[0];
                 const screenshotTarget = state.scanMeta.hostname || state.scanMeta.ip;
-                fetch(`/api/screenshot/capture?target=${encodeURIComponent(screenshotTarget)}&port=${firstWebPort.port}`, { method: 'POST' })
-                    .then(r => (r.ok ? r.json() : null))
+                apiJSON(`/api/screenshot/capture?target=${encodeURIComponent(screenshotTarget)}&port=${firstWebPort.port}`, { method: 'POST' })
                     // Poll with the key the server stores the capture under.
                     .then(d => { if (d?.target) pollScreenshot(d.target); })
-                    .catch(() => {});
+                    .catch(e => showToast(e.message, 'error', 6000));
             }
             if (state.counts.open > 0) {
                 $('btn-fingerprint').style.display = 'inline-flex';
@@ -276,6 +302,12 @@ export function stopScan(completed = false) {
         }
     }
 
+    if (errorMsg) {
+        if (!state.scanMeta) $('status-target').textContent = state.lang === 'es' ? 'Error' : 'Error';
+        showError(errorMsg);
+        showToast(errorMsg, 'error', 6000);
+        return;
+    }
     if (!state.results.length) {
         const msg = state.lang === 'es' ? 'Sin resultados' : 'No results found';
         $('results-body').innerHTML = `<tr><td colspan="6"><div class="empty-state">[ _ ]<br>${msg}</div></td></tr>`;
@@ -312,23 +344,11 @@ export async function runFingerprint() {
     };
 
     try {
-        const resp = await fetch(
+        const data = await apiJSON(
             `/api/fingerprint?target=${encodeURIComponent(target)}&ports=${openPorts.join(',')}`,
             { signal: ctrl.signal }
         );
         clearController('fingerprint');
-        if (!resp.ok) {
-            // Errors use the common format {ok:false, error, detail}.
-            const body = await resp.json().catch(() => ({}));
-            throw new Error(body.detail || `HTTP ${resp.status}`);
-        }
-        const data = await resp.json();
-
-        if (data.error) {
-            btn.className = 'btn-fingerprint fp-error'; btn.innerHTML = '⚠ Error';
-            statusEl.style.cssText = 'color:#cc3344'; statusEl.textContent = 'Error: ' + data.error;
-            resetBtn(); return;
-        }
 
         const results = data.results || {};
         if (results._error === 'nmap_not_installed') {
@@ -376,9 +396,9 @@ export async function runFingerprint() {
     } catch (e) {
         clearController('fingerprint');
         if (e.name === 'AbortError') return;
-        btn.className = 'btn-fingerprint fp-error'; btn.innerHTML = '⚠ Timeout';
+        btn.className = 'btn-fingerprint fp-error'; btn.innerHTML = '⚠ Error';
         statusEl.style.cssText = 'color:#cc3344';
-        statusEl.textContent = (state.lang === 'es' ? 'Error: ' : 'Error: ') + e.message;
+        statusEl.textContent = e.message;
         resetBtn();
     }
 }
@@ -411,30 +431,35 @@ export async function launchAudit() {
     const auditCtrl = getController('audit');
     const sslCtrl   = getController('ssl');
 
-    const auditFetch = fetch(
+    // Each request resolves to {data} or {error: message} (null if aborted).
+    const settle = p => p.then(data => ({ data }))
+                         .catch(e => (e.name === 'AbortError' ? null : { error: e.message }));
+
+    const auditFetch = settle(apiJSON(
         `/api/audit?target=${encodeURIComponent(target)}&open_ports=${encodeURIComponent(openPorts)}`,
         { signal: auditCtrl.signal }
-    ).then(r => (r.ok ? r.json() : null)).catch(() => null);
+    ));
 
     const sslFetch = sslPorts.length > 0
-        ? fetch(
+        ? settle(apiJSON(
             `/api/ssl?target=${encodeURIComponent(target)}&open_ports=${encodeURIComponent(sslPorts.join(','))}`,
             { signal: sslCtrl.signal }
-          ).then(r => (r.ok ? r.json() : null)).catch(() => null)
-        : Promise.resolve(null);
+          ))
+        : Promise.resolve({ data: null });
 
     try {
-        const [auditData, sslData] = await Promise.all([auditFetch, sslFetch]);
+        const [auditRes, sslRes] = await Promise.all([auditFetch, sslFetch]);
         clearController('audit');
         clearController('ssl');
+        if (!auditRes && !sslRes) return;           // superseded by a newer audit
 
-        if (auditData) { state.auditData = auditData; renderAudit(auditData); }
-        else {
-            allPanes.slice(0, 3).forEach(p => {
-                $('pane-' + p).innerHTML = `<div class="no-results">⚠ ${state.lang === 'es' ? 'Error al conectar' : 'Connection error'}</div>`;
-            });
+        const errorPane = msg => `<div class="no-results">⚠ ${escapeHTML(msg)}</div>`;
+        if (auditRes?.data) { state.auditData = auditRes.data; renderAudit(auditRes.data); }
+        else if (auditRes?.error) {
+            allPanes.slice(0, 3).forEach(p => { $('pane-' + p).innerHTML = errorPane(auditRes.error); });
         }
-        renderSSLAudit(sslData);
+        if (sslRes?.error) $('pane-ssl').innerHTML = errorPane(sslRes.error);
+        else renderSSLAudit(sslRes?.data ?? null);
         renderCVEPlaceholder();
         statusEl.textContent = '';
     } catch {
@@ -475,19 +500,18 @@ export async function launchCVELookup() {
     const ctrl = getController('cve');
 
     try {
-        const resp = await fetch('/api/cve/batch', {
+        const data = await apiJSON('/api/cve/batch', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify(versionsPayload),
             signal:  ctrl.signal,
         });
         clearController('cve');
-        const data = await resp.json();
         renderCVEAudit(data.results || {}, versionsPayload);
     } catch (e) {
         clearController('cve');
         if (e.name === 'AbortError') return;
-        pane.innerHTML = `<div class="no-results">⚠ ${state.lang === 'es' ? 'No se pudo conectar con NVD' : 'Could not connect to NVD'}</div>`;
+        pane.innerHTML = `<div class="no-results">⚠ ${escapeHTML(e.message)}</div>`;
     }
 }
 
@@ -504,14 +528,8 @@ export async function launchDiscover() {
     const ctrl = getController('discover');
 
     try {
-        const resp = await fetch(`/api/discover?cidr=${encodeURIComponent(cidr)}`, { signal: ctrl.signal });
+        const data = await apiJSON(`/api/discover?cidr=${encodeURIComponent(cidr)}`, { signal: ctrl.signal });
         clearController('discover');
-        const data = await resp.json();
-
-        if (data.error) {
-            output.innerHTML = `<div class="no-results">⚠ ${escapeHTML(data.detail || data.error)}</div>`;
-            return;
-        }
         output.innerHTML = tmplDiscoverOutput(data, cidr, state.lang);
     } catch (e) {
         clearController('discover');
@@ -535,14 +553,8 @@ export async function launchSubdomains() {
     const ctrl = getController('subdomains');
 
     try {
-        const resp = await fetch(`/api/subdomains?domain=${encodeURIComponent(domain)}`, { signal: ctrl.signal });
+        const data = await apiJSON(`/api/subdomains?domain=${encodeURIComponent(domain)}`, { signal: ctrl.signal });
         clearController('subdomains');
-        const data = await resp.json();
-
-        if (data.error) {
-            output.innerHTML = `<div class="no-results">⚠ ${escapeHTML(data.detail || data.error)}</div>`;
-            return;
-        }
         output.innerHTML = tmplSubdomainsOutput(data, domain, state.lang);
     } catch (e) {
         clearController('subdomains');

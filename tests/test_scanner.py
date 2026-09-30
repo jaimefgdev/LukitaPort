@@ -4,6 +4,7 @@ import asyncio
 import errno
 import random
 import socket
+import sys
 
 import pytest
 
@@ -142,14 +143,14 @@ def _raise(exc):
     (TimeoutError(), "filtered"),
 ])
 async def test_error_states(monkeypatch, exc, state):
-    monkeypatch.setattr(asyncio, "open_connection", _raise(exc))
+    monkeypatch.setattr(scanner, "_open_connection", _raise(exc))
     res = await scanner._scan_port_async("127.0.0.1", 80, 1.0)
     assert res["state"] == state
     assert "error" not in res
 
 
 async def test_unexpected_oserror_is_labelled(monkeypatch):
-    monkeypatch.setattr(asyncio, "open_connection", _raise(OSError(errno.EPROTO, "proto")))
+    monkeypatch.setattr(scanner, "_open_connection", _raise(OSError(errno.EPROTO, "proto")))
     res = await scanner._scan_port_async("127.0.0.1", 80, 1.0)
     assert res["state"] == "filtered" and res["error"] == "EPROTO"
 
@@ -163,18 +164,19 @@ async def test_emfile_is_retried_not_reported_as_filtered(monkeypatch):
             raise OSError(errno.EMFILE, "Too many open files")
         raise ConnectionRefusedError(errno.ECONNREFUSED, "refused")
 
-    monkeypatch.setattr(asyncio, "open_connection", flaky)
+    monkeypatch.setattr(scanner, "_open_connection", flaky)
     res = await scanner._probe_with_retry("127.0.0.1", 80, 1.0)
     assert res["state"] == "closed" and calls["n"] == 3
 
 
 async def test_persistent_emfile_aborts_scan(monkeypatch):
-    monkeypatch.setattr(asyncio, "open_connection", _raise(OSError(errno.EMFILE, "Too many open files")))
+    monkeypatch.setattr(scanner, "_open_connection", _raise(OSError(errno.EMFILE, "Too many open files")))
     monkeypatch.setattr(scanner, "_RESOURCE_RETRIES", 2)
     with pytest.raises(scanner.ScanResourceError):
         await _collect(scanner.scan_ports_stream("127.0.0.1", [1, 2], max_concurrent=2))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="no RLIMIT_NOFILE on Windows")
 def test_concurrency_capped_by_fd_limit(monkeypatch):
     import resource
     monkeypatch.setattr(resource, "getrlimit", lambda r: (256, 4096))
