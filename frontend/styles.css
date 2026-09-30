@@ -61,6 +61,27 @@ body.en .es { display: none !important; }
     padding: 24px; animation: fadeOverlay .3s ease;
 }
 #legal-overlay.hidden { display: none; }
+
+/* ── ACCESO (token) ─────────────────────────────────────────────────────────── */
+#auth-overlay {
+    position: fixed; inset: 0;
+    background: rgba(5,5,5,0.97); backdrop-filter: blur(8px);
+    z-index: 9500; display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+}
+#auth-overlay.hidden { display: none; }
+.auth-input {
+    width: 100%; margin-top: 8px; padding: 10px 12px;
+    background: #0a0a0a; border: 1px solid #333; border-radius: 4px;
+    color: var(--text-main); font-family: var(--font-mono); font-size: 13px;
+}
+.auth-error { min-height: 18px; margin-top: 8px; color: #ff4455; font-family: var(--font-mono); font-size: 11px; }
+
+/* ── Aviso GeoIP ───────────────────────────────────────────────────────────── */
+.geoip-notice {
+    margin-top: 10px; font-family: var(--font-mono); font-size: 10px;
+    color: #888; letter-spacing: .3px;
+}
 @keyframes fadeOverlay { from { opacity: 0; } to { opacity: 1; } }
 
 .legal-popup {
@@ -444,3 +465,12 @@ footer a:hover { color: var(--accent); }
 @media(max-width:760px){.scan-form-compact{grid-template-columns:1fr 1fr}}
 @media(max-width:480px){.scan-form-compact{grid-template-columns:1fr}}
 .anon-row{display:flex;align-items:center;gap:12px;padding:9px 14px;background:#080808;border:1px solid #1e1e1e;border-radius:4px;margin-bottom:12px}
+
+/* ── Dynamic components (formerly injected at runtime by ui.js) ─────────────── */
+.btn-cve-launch {
+    padding: 8px 22px; background: transparent; border: 1px solid #333; border-radius: 4px;
+    color: #888; font-family: var(--font-mono); font-size: 11px; cursor: pointer;
+    letter-spacing: .8px; transition: all .2s;
+}
+.btn-cve-launch:hover { border-color: #ff0033 !important; color: #ff0033 !important; }
+.discover-host-card:hover { border-color: rgba(0, 255, 136, .5) !important; }

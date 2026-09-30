@@ -18,9 +18,12 @@ from typing import Annotated, Any, Optional
 from pydantic import (
     BaseModel,
     Field,
+    RootModel,
     field_validator,
     model_validator,
 )
+
+from limits import MAX_CVE_BATCH
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Re-usable type aliases
@@ -360,20 +363,44 @@ class CVELookupResponse(BaseModel):
     cached:       bool          = False
 
 
+class CVEServiceInfo(BaseModel):
+    name:    str = Field("", max_length=100)
+    product: str = Field("", max_length=100)
+    version: str = Field("", max_length=100)
+
+
+class CVEBatchRequest(RootModel[dict[Port, CVEServiceInfo]]):
+    """``{"<port>": {"name": ..., "version": ...}, ...}`` — bounded size."""
+
+    @model_validator(mode="after")
+    def cap_size(self) -> "CVEBatchRequest":
+        if len(self.root) > MAX_CVE_BATCH:
+            raise ValueError(f"At most {MAX_CVE_BATCH} ports per CVE batch.")
+        return self
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /api/auth
+# ──────────────────────────────────────────────────────────────────────────────
+
+class AuthRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=512)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # /api/export  (PDF / Markdown)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class ScanData(BaseModel):
     meta:    dict[str, Any]
-    results: list[dict[str, Any]]
+    results: list[dict[str, Any]] = Field(..., max_length=65_535)
     summary: dict[str, Any]
 
 
 class ExportRequest(BaseModel):
     scan:              ScanData
     audit:             Optional[dict[str, Any]] = None
-    screenshot_target: Optional[str]            = None
+    screenshot_target: Optional[str]            = Field(None, max_length=253)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -27,13 +27,25 @@ Shutdown:
   2. Close the shared Playwright browser and stop the playwright instance,
      preventing orphan Chromium processes after Uvicorn stops.
 
+Access control
+──────────────
+``security.SecurityMiddleware`` requires the API token on every ``/api/``
+route, validates the Host header, adds security headers (CSP, …), rate-limits
+clients and caps request bodies.  See security.py for the threat model.
+
 SSRF protection
 ───────────────
-After every resolve_target() call, check whether the resolved IP is an
-internal/private address.  If so, return HTTP 403 Forbidden.
+After every resolve_target() call, check whether *any* resolved address is
+internal/private.  If so, return HTTP 403 Forbidden.  The first address is
+pinned: every later connection for that request goes to that IP.
 
 The check is skipped when ``ALLOW_PRIVATE_IPS=true`` is set in the
 environment — useful for scanning internal lab networks.
+
+Resource limits
+───────────────
+Heavy operations take a slot from ``limits``; when none is free the request
+fails fast with HTTP 429.
 """
 
 from __future__ import annotations
@@ -46,15 +58,17 @@ from contextlib import asynccontextmanager
 from typing import Annotated, AsyncGenerator, Optional
 
 from fastapi import BackgroundTasks, FastAPI, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import geoip as geoip_db   # (module; `geoip` is also an endpoint below)
+import limits
+import security
 from logging_config import configure_logging, get_logger
-from models import ExportRequest, ScreenshotCaptureResponse
+from models import AuthRequest, CVEBatchRequest, ExportRequest, ScreenshotCaptureResponse
 from cache import screenshot_cache
 from config import PORT_RISK
-from resolver import resolve_target, is_ssrf_blocked
+from resolver import resolve_target, is_ssrf_blocked, network_ssrf_blocked
 from scanner import scan_ports_stream, get_port_range, PROFILES
 from auditor import run_full_audit
 from ssl_analyzer import analyze_ssl_for_ports
@@ -69,6 +83,7 @@ from scan_service import (
     build_markdown_report,
     set_browser,
     clear_browser,
+    BROWSER_ARGS,
 )
 
 import ipaddress
@@ -82,10 +97,22 @@ import re as _re
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
     # ── Startup ───────────────────────────────────────────────────────────────
     configure_logging(os.getenv("LOG_LEVEL", "INFO"))
+
+    # Fail fast on an unsafe/invalid security configuration.
+    settings = security.get_settings()
     logger.info(
         "lukitaport_starting",
         allow_private_ips=os.getenv("ALLOW_PRIVATE_IPS", "false"),
+        token_source="env" if settings.token_from_env else "generated",
+        admin_enabled=settings.enable_admin,
+        geoip=geoip_db.status()["enabled"],
     )
+    if not settings.token_from_env:
+        # Ephemeral token: show the operator how to log in.  The token is in
+        # the URL fragment, which browsers never send to the server.
+        url = security.login_url(settings, int(os.getenv("LUKITA_PORT", "8000")))
+        logger.warning("api_token_generated", login_url=url)
+        print(f"\n  LukitaPort — open this URL to log in:\n  {url}\n", flush=True)
 
     # ── Playwright shared browser ─────────────────────────────────────────────
     _pw = None
@@ -96,7 +123,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
         _pw               = await async_playwright().start()
         _browser_instance = await _pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            args=BROWSER_ARGS,
         )
         set_browser(_browser_instance)
         logger.info("playwright_ready", browser="chromium")
@@ -163,12 +190,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
+# No CORS: the UI is served from the same origin and no other site may call
+# the API.  SecurityMiddleware handles auth, Host checks, headers and limits.
+app.add_middleware(security.SecurityMiddleware)
+
+
+@app.exception_handler(limits.Busy)
+async def _busy_handler(request: Request, exc: limits.Busy) -> Response:  # noqa: ARG001
+    return _json_response({"ok": False, "error": "busy", "detail": str(exc)}, 429)
 
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
@@ -264,16 +293,22 @@ def _validate_domain(domain: str) -> tuple[Optional[str], Optional[Response]]:
     return d, None
 
 
-def _validate_ports_str(ports: str) -> tuple[Optional[list[int]], Optional[Response]]:
+def _validate_ports_str(
+    ports: str, max_ports: int = limits.MAX_AUDIT_PORTS,
+) -> tuple[Optional[list[int]], Optional[Response]]:
     result: list[int] = []
-    for p in ports.split(","):
+    items = ports.split(",")
+    if len(items) > max_ports:
+        return None, _bad(f"Too many ports (max {max_ports}).")
+    for p in items:
         p = p.strip()
         if not p.isdigit():
             return None, _bad(f"Invalid port value: '{p}'")
         pint = int(p)
         if not (1 <= pint <= 65_535):
             return None, _bad(f"Port {pint} is out of range (1–65535).")
-        result.append(pint)
+        if pint not in result:
+            result.append(pint)
     return result, None
 
 
@@ -307,7 +342,45 @@ def _check_resolution(resolution: dict) -> Optional[Response]:
 
 @app.get("/api/config", include_in_schema=False)
 def get_config() -> dict:
-    return {"portRisk": {str(k): v for k, v in PORT_RISK.items()}}
+    return {
+        "portRisk": {str(k): v for k, v in PORT_RISK.items()},
+        "geoip":    geoip_db.status(),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Authentication  (exempt from the token check, see security.py)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/auth/status", include_in_schema=False)
+def auth_status(request: Request) -> dict:
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    return {"authenticated": security.is_authenticated(headers, security.get_settings())}
+
+
+@app.post("/api/auth", include_in_schema=False)
+def auth_login(payload: AuthRequest, request: Request) -> Response:
+    settings = security.get_settings()
+    if not settings.token_matches(payload.token):
+        logger.warning("auth_failed", client=request.client.host if request.client else None)
+        return _bad("Invalid token.", 401)
+    resp = Response(status_code=204)
+    resp.set_cookie(
+        security.SESSION_COOKIE,
+        settings.session_value(),
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+    return resp
+
+
+@app.post("/api/auth/logout", include_in_schema=False)
+def auth_logout() -> Response:
+    resp = Response(status_code=204)
+    resp.delete_cookie(security.SESSION_COOKIE, path="/")
+    return resp
 
 
 @app.get("/", include_in_schema=False)
@@ -346,8 +419,10 @@ async def geoip(target: str = Query(...)) -> Response:
     resolution_err = _check_resolution(resolution)
     if resolution_err:
         return resolution_err
+    if not geoip_db.is_enabled():
+        return _json_response({"ip": resolution["ip"], "enabled": False})
     geo = await fetch_geoip(resolution["ip"])
-    return _json_response({"ip": resolution["ip"], **geo})
+    return _json_response({"ip": resolution["ip"], "enabled": True, **geo})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -409,6 +484,18 @@ async def scan(
     )
 
     async def event_stream() -> AsyncGenerator[str, None]:
+        # The slot is taken inside the generator so it is released in the
+        # same place (finally) even if the client disconnects early.
+        if not limits.scans.try_acquire():
+            yield f"data: {json.dumps({'error': str(limits.Busy('scan')), 'status': 429})}\n\n"
+            return
+        try:
+            async for chunk in _scan_events():
+                yield chunk
+        finally:
+            limits.scans.release()
+
+    async def _scan_events() -> AsyncGenerator[str, None]:
         try:
             geo = await asyncio.wait_for(
                 asyncio.create_task(fetch_geoip(ip)), timeout=3.0
@@ -465,6 +552,8 @@ async def discover(
     network, err = _validate_cidr(cidr)
     if err:
         return err
+    if network_ssrf_blocked(network):
+        return _ssrf_error(str(network))
     # islice: never materialise more host objects than will be pinged.
     hosts = list(itertools.islice(network.hosts(), max_hosts))
     if not hosts:
@@ -505,7 +594,7 @@ async def fingerprint(
     safe, err = _validate_target(target)
     if err:
         return err
-    port_list, err2 = _validate_ports_str(ports)
+    port_list, err2 = _validate_ports_str(ports, limits.MAX_FINGERPRINT_PORTS)
     if err2:
         return err2
 
@@ -516,7 +605,8 @@ async def fingerprint(
 
     ports_str   = ",".join(str(p) for p in port_list)
     timeout_sec = nmap_timeout(len(port_list))
-    results     = await run_nmap(resolution["ip"], ports_str, timeout_sec)
+    async with limits.nmap:
+        results = await run_nmap(resolution["ip"], ports_str, timeout_sec)
 
     return _json_response({
         "ip":          resolution["ip"],
@@ -556,8 +646,10 @@ async def capture_screenshot(
     if resolution_err:
         return resolution_err
 
-    hostname = resolution["hostname"] or target
-    background_tasks.add_task(take_screenshot, hostname, port)
+    hostname = resolution["hostname"] or resolution["ip"]
+    # The slot is released by take_screenshot when the capture finishes.
+    limits.screenshots.acquire()
+    background_tasks.add_task(take_screenshot, hostname, resolution["ip"], port)
 
     payload = ScreenshotCaptureResponse(status="capturing", target=hostname, port=port)
     return _json_response(payload.model_dump())
@@ -589,8 +681,9 @@ async def audit(
     if resolution_err:
         return resolution_err
 
-    hostname = resolution["hostname"] or target
-    result   = await run_full_audit(hostname, port_list)
+    hostname = resolution["hostname"] or resolution["ip"]
+    async with limits.audits:
+        result = await run_full_audit(hostname, port_list, pinned_ip=resolution["ip"])
     return _json_response({"target": target, "ip": resolution["ip"], **result})
 
 
@@ -616,11 +709,12 @@ async def ssl_analysis(
     if resolution_err:
         return resolution_err
 
-    hostname = resolution["hostname"] or target
-    loop     = asyncio.get_event_loop()
-    result   = await loop.run_in_executor(
-        None, analyze_ssl_for_ports, hostname, port_list, timeout
-    )
+    hostname = resolution["hostname"] or resolution["ip"]
+    loop     = asyncio.get_running_loop()
+    async with limits.ssl_checks:
+        result = await loop.run_in_executor(
+            None, analyze_ssl_for_ports, hostname, port_list, timeout, resolution["ip"]
+        )
     return _json_response({"target": target, "ip": resolution["ip"], **result})
 
 
@@ -630,8 +724,8 @@ async def ssl_analysis(
 
 @app.get("/api/cve")
 async def cve_lookup_endpoint(
-    service:     str = Query(...),
-    version:     str = Query(""),
+    service:     str = Query(..., min_length=1, max_length=100),
+    version:     str = Query("", max_length=100),
     max_results: int = Query(5, ge=1, le=10),
 ) -> Response:
     result = await lookup_cves(service, version, max_results)
@@ -639,8 +733,9 @@ async def cve_lookup_endpoint(
 
 
 @app.post("/api/cve/batch")
-async def cve_batch(versions: dict) -> Response:
-    results = await lookup_cves_for_ports(versions)
+async def cve_batch(versions: CVEBatchRequest) -> Response:
+    payload = {port: info.model_dump() for port, info in versions.root.items()}
+    results = await lookup_cves_for_ports(payload)
     return _json_response({"results": results})
 
 
@@ -703,8 +798,8 @@ async def export_pdf(payload: ExportRequest) -> Response:
     except ImportError:
         return _json_response({"error": "reportlab not installed."}, 500)
     except Exception as exc:  # noqa: BLE001
-        logger.error("pdf_export_error", error=str(exc))
-        return _json_response({"error": str(exc)}, 500)
+        logger.error("pdf_export_error", error=str(exc), exc_info=True)
+        return _json_response({"ok": False, "error": "PDF generation failed."}, 500)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -727,5 +822,6 @@ async def server_status() -> Response:
         "ok":                 True,
         "playwright_ready":   pw_browser is not None,
         "screenshot_cache":   screenshot_cache.stats(),
+        "limits":             limits.stats(),
         "allow_private_ips":  os.getenv("ALLOW_PRIVATE_IPS", "false"),
     })

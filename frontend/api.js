@@ -17,7 +17,7 @@ import { state }     from './state.js';
 import { $, showToast, appendRow, renderTable, updateSummary, setDotBlink,
          showError, saveHistory, renderHistory, renderAudit, renderSSLAudit,
          renderCVEAudit, renderCVEPlaceholder, renderGeo,
-         flushAndDrain }  from './ui.js';
+         flushAndDrain, escapeHTML }  from './ui.js';
 import { tmplDiscoverOutput, tmplSubdomainsOutput, tmplCVELoading } from './templates.js';
 
 // ── Timeout constants (must match backend config) ─────────────────────────────
@@ -394,13 +394,13 @@ export async function launchAudit() {
     const auditFetch = fetch(
         `/api/audit?target=${encodeURIComponent(target)}&open_ports=${encodeURIComponent(openPorts)}`,
         { signal: auditCtrl.signal }
-    ).then(r => r.json()).catch(e => (e.name === 'AbortError' ? null : null));
+    ).then(r => (r.ok ? r.json() : null)).catch(() => null);
 
     const sslFetch = sslPorts.length > 0
         ? fetch(
             `/api/ssl?target=${encodeURIComponent(target)}&open_ports=${encodeURIComponent(sslPorts.join(','))}`,
             { signal: sslCtrl.signal }
-          ).then(r => r.json()).catch(e => (e.name === 'AbortError' ? null : null))
+          ).then(r => (r.ok ? r.json() : null)).catch(() => null)
         : Promise.resolve(null);
 
     try {
@@ -485,14 +485,14 @@ export async function launchDiscover() {
         const data = await resp.json();
 
         if (data.error) {
-            output.innerHTML = `<div class="no-results">⚠ ${data.error}</div>`;
+            output.innerHTML = `<div class="no-results">⚠ ${escapeHTML(data.detail || data.error)}</div>`;
             return;
         }
         output.innerHTML = tmplDiscoverOutput(data, cidr, state.lang);
     } catch (e) {
         clearController('discover');
         if (e.name === 'AbortError') return;
-        output.innerHTML = `<div class="no-results">⚠ ${e.message}</div>`;
+        output.innerHTML = `<div class="no-results">⚠ ${escapeHTML(e.message)}</div>`;
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = state.lang === 'es' ? 'Descubrir' : 'Discover'; }
     }
@@ -516,14 +516,14 @@ export async function launchSubdomains() {
         const data = await resp.json();
 
         if (data.error) {
-            output.innerHTML = `<div class="no-results">⚠ ${data.error}</div>`;
+            output.innerHTML = `<div class="no-results">⚠ ${escapeHTML(data.detail || data.error)}</div>`;
             return;
         }
         output.innerHTML = tmplSubdomainsOutput(data, domain, state.lang);
     } catch (e) {
         clearController('subdomains');
         if (e.name === 'AbortError') return;
-        output.innerHTML = `<div class="no-results">⚠ ${e.message}</div>`;
+        output.innerHTML = `<div class="no-results">⚠ ${escapeHTML(e.message)}</div>`;
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = state.lang === 'es' ? 'Buscar Subdominios' : 'Find Subdomains'; }
     }

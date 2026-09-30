@@ -13,8 +13,8 @@
 //   "launch-cve"                                   → run CVE batch lookup
 //   "scan-host"   + data-host="{ip|hostname}"      → load into target input
 //
-// Hover for .btn-cve-launch is handled purely by CSS class injected once by
-// initDelegationStyles() in ui.js (no JS onmouseover/onmouseout).
+// Hover for .btn-cve-launch is handled purely by CSS (styles.css), with no
+// JS onmouseover/onmouseout.
 //
 // ── Non-blocking exports ──────────────────────────────────────────────────────
 // tmplHTMLReport(opts, prebuiltRowsHtml?)
@@ -422,7 +422,7 @@ export function tmplCVEAudit(results, versionsPayload, lang) {
 export function tmplCVEPlaceholder(lang) {
     // ── CSP-compliant: data-action="launch-cve" replaces onclick ─────────────
     // Hover effect handled entirely by CSS class .btn-cve-launch
-    // (injected once into <head> by initDelegationStyles() in ui.js)
+    // (defined in styles.css)
     return `<div class="no-results" style="padding:36px 24px">[ 🐛 ]<br>
         <span style="display:block;margin:12px 0 20px;font-size:12px">${lang === 'es' ? 'Ejecuta <b style="color:#aaa">Fingerprinting</b> para resultados precisos, o lanza el análisis ahora.' : 'Run <b style="color:#aaa">Fingerprinting</b> for precise results, or launch analysis now.'}</span>
         <button id="btn-launch-cve"

@@ -1,13 +1,13 @@
-version: "3.9"
-
-# ── LukitaPort v2.0 — docker-compose ────────────────────────────────────────
+# ── LukitaPort — docker-compose ─────────────────────────────────────────────
 # Usage:
-#   docker compose up --build          # first run (builds image)
-#   docker compose up                  # subsequent runs
-#   docker compose up -d               # detached mode
-#   docker compose down                # stop & remove containers
+#   export LUKITA_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+#   docker compose up --build
 #
-# Open http://localhost:8000 after the server starts.
+# Then open http://127.0.0.1:8000 and enter the token.
+#
+# The port is published on 127.0.0.1 only.  Inside the container the server
+# listens on 0.0.0.0, so LUKITA_API_TOKEN is mandatory (compose refuses to
+# start without it).
 
 services:
   lukitaport:
@@ -17,34 +17,39 @@ services:
     container_name: lukitaport
 
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
-    # nmap requires NET_ADMIN or CAP_NET_RAW for SYN scans.
-    # The app uses connect-scan (-sT) which doesn't need root,
-    # but these caps future-proof for -sS if you add it later.
-    cap_add:
-      - NET_RAW
-      - NET_ADMIN
+    environment:
+      LUKITA_API_TOKEN: ${LUKITA_API_TOKEN:?Set LUKITA_API_TOKEN (at least 16 characters)}
+      # Host headers accepted from the browser (anti DNS-rebinding).
+      LUKITA_ALLOWED_HOSTS: ${LUKITA_ALLOWED_HOSTS:-127.0.0.1,localhost}
+      ALLOW_PRIVATE_IPS: ${ALLOW_PRIVATE_IPS:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Optional local GeoIP: mount the .mmdb files and set the paths, e.g.
+      # LUKITA_GEOIP_DB: /geoip/GeoLite2-City.mmdb
 
-    # Playwright/Chromium needs /dev/shm large enough for Chrome's sandbox
+    # Least privilege: connect scans (-sT) and unprivileged ICMP need no
+    # capabilities; the filesystem is read-only except for /tmp.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+
+    # Chromium needs a larger /dev/shm
     shm_size: "256m"
 
-    # Environment overrides (optional)
-    environment:
-      - PYTHONUNBUFFERED=1
-      - PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
-
-    # Restart policy — always restart unless manually stopped
     restart: unless-stopped
 
-    # Health check — hit the root endpoint every 30 s
+    # The UI page is public (the API is not), so it works as a health check.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
 
-    # Volumes — uncomment to persist nothing (stateless) or mount code for dev
     # volumes:
-    #   - .:/app                # live-reload dev mount (requires --reload in CMD)
+    #   - ./geoip:/geoip:ro      # GeoLite2 databases (optional)
