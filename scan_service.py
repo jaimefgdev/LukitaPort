@@ -21,6 +21,7 @@ Responsibilities
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import re
 import shutil
 import socket
@@ -171,7 +172,7 @@ async def ping_sweep(hosts: list, concurrency: int = 64) -> list[dict]:
     """
     Ping all hosts concurrently (max ``concurrency`` at once).
 
-    Returns a list of alive-host dicts sorted ascending by IP octet.
+    Returns a list of alive-host dicts sorted ascending by IP address.
     """
     sem = asyncio.Semaphore(concurrency)
 
@@ -185,7 +186,7 @@ async def ping_sweep(hosts: list, concurrency: int = 64) -> list[dict]:
         r for r in results
         if isinstance(r, dict) and r and r.get("alive")
     ]
-    alive.sort(key=lambda x: list(map(int, x["ip"].split("."))))
+    alive.sort(key=lambda x: ipaddress.ip_address(x["ip"]))
     return alive
 
 
@@ -353,17 +354,18 @@ def _parse_nmap_xml(xml: str) -> dict:
                     state_el = port_el.find("state")
                     if state_el is None or state_el.get("state") != "open":
                         continue
-                    svc = port_el.find("service") or {}
-
-                    def _sget(el, attr: str) -> str:  # noqa: ANN001
-                        return el.get(attr, "") if hasattr(el, "get") else ""
-
-                    product   = _sget(svc, "product")
-                    version   = _sget(svc, "version")
-                    extrainfo = _sget(svc, "extrainfo")
-                    name      = _sget(svc, "name")
-                    cpe_el    = svc.find("cpe") if hasattr(svc, "find") else None  # type: ignore[union-attr]
-                    cpe       = cpe_el.text if cpe_el is not None else ""
+                    # NB: an Element without children is falsy, so never use
+                    # ``find(...) or default`` here — compare against None.
+                    svc = port_el.find("service")
+                    if svc is not None:
+                        product   = svc.get("product", "")
+                        version   = svc.get("version", "")
+                        extrainfo = svc.get("extrainfo", "")
+                        name      = svc.get("name", "")
+                        cpe_el    = svc.find("cpe")
+                        cpe       = (cpe_el.text or "") if cpe_el is not None else ""
+                    else:
+                        product = version = extrainfo = name = cpe = ""
 
                     banner = ""
                     if not product and not version:
