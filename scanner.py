@@ -31,7 +31,8 @@ import asyncio
 import errno
 import random
 import socket
-from typing import AsyncGenerator, Optional
+from typing import Optional
+from collections.abc import AsyncGenerator
 
 COMMON_PORTS = [
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445,
@@ -145,7 +146,9 @@ _DEFAULT_STRATEGY = ("read", None)
 _BANNER_TIMEOUT   = 0.8
 
 
-async def _grab_banner(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, port: int) -> Optional[str]:
+async def _grab_banner(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, port: int,
+) -> Optional[str]:
     strategy, probe = _BANNER_STRATEGY.get(port, _DEFAULT_STRATEGY)
 
     if strategy == "skip":
@@ -167,7 +170,7 @@ async def _grab_banner(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         banner = " ".join(raw.decode("utf-8", errors="replace").strip().split())
         return banner[:120] if banner else None
 
-    except (asyncio.TimeoutError, OSError):
+    except (TimeoutError, OSError):
         return None
 
 
@@ -189,7 +192,7 @@ async def _scan_port_async(ip: str, port: int, timeout: float) -> dict:
 
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         result["state"] = "filtered"
         result["response_time_ms"] = elapsed_ms()
         return result
@@ -204,7 +207,7 @@ async def _scan_port_async(ip: str, port: int, timeout: float) -> dict:
             # port, which is what "filtered" means.
             result["state"] = "filtered"
             if exc.errno not in _UNREACHABLE_ERRNOS:
-                result["error"] = errno.errorcode.get(exc.errno, str(exc))
+                result["error"] = errno.errorcode.get(exc.errno or 0, str(exc))
         return result
 
     result["state"] = "open"
@@ -232,7 +235,7 @@ async def _probe_with_retry(ip: str, port: int, timeout: float) -> dict:
                 raise
             if attempt == _RESOURCE_RETRIES:
                 raise ScanResourceError(
-                    f"Local resources exhausted ({errno.errorcode.get(exc.errno, exc.errno)}); "
+                    f"Local resources exhausted ({errno.errorcode.get(exc.errno or 0, str(exc.errno))}); "
                     "lower the concurrency (profile) or raise the open-files limit."
                 ) from exc
             await asyncio.sleep(delay)
@@ -277,7 +280,7 @@ async def scan_ports_stream(
                 await asyncio.sleep(rng.uniform(*jitter))
             try:
                 res = await _probe_with_retry(ip, port, timeout)
-            except Exception as exc:  # noqa: BLE001 — surfaced to the consumer
+            except Exception as exc:
                 # A dead worker must never leave the consumer waiting forever.
                 await results.put(exc)
                 return
@@ -304,7 +307,9 @@ async def scan_ports_stream(
         await asyncio.gather(*workers, return_exceptions=True)
 
 
-def get_port_range(mode: str, port_start: int = None, port_end: int = None) -> list:
+def get_port_range(
+    mode: str, port_start: Optional[int] = None, port_end: Optional[int] = None,
+) -> list[int]:
     if mode == "quick":
         return COMMON_PORTS
     if mode == "full":

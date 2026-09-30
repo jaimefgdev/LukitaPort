@@ -48,10 +48,10 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import os
 import socket
 from typing import Optional
 
+import settings
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -62,13 +62,8 @@ logger = get_logger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _allow_private_ips() -> bool:
-    """
-    Read ALLOW_PRIVATE_IPS from the environment on every call.
-
-    Re-reading (rather than caching at import time) lets unit tests patch
-    ``os.environ`` without reloading the module.
-    """
-    return os.getenv("ALLOW_PRIVATE_IPS", "false").strip().lower() in ("1", "true", "yes")
+    """ALLOW_PRIVATE_IPS from settings (re-read after ``reset_settings()``)."""
+    return settings.get_settings().allow_private_ips
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -115,20 +110,6 @@ def is_ssrf_blocked(ip_str: str) -> bool:
 # Low-level IP validation helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def is_valid_ip(target: str) -> bool:
-    """
-    Return True if ``target`` is a syntactically valid IPv4 address.
-
-    Kept for backward compatibility with scanner.py which uses
-    ``socket.inet_aton`` semantics.
-    """
-    try:
-        socket.inet_aton(target)
-        return True
-    except socket.error:
-        return False
-
-
 def is_valid_ip_any(target: str) -> bool:
     """Return True for any valid IPv4 **or** IPv6 address string."""
     try:
@@ -153,7 +134,7 @@ async def reverse_lookup(ip: str, timeout: float = REVERSE_DNS_TIMEOUT) -> Optio
             loop.run_in_executor(None, socket.gethostbyaddr, ip), timeout,
         )
         return name
-    except (OSError, asyncio.TimeoutError):
+    except (TimeoutError, OSError):
         return None
 
 
@@ -188,8 +169,8 @@ async def resolve_target(target: str, reverse_dns: bool = False) -> dict:
     # ── Branch A: direct IP literal ──────────────────────────────────────────
     if is_valid_ip_any(target):
         ptr = await reverse_lookup(target) if reverse_dns else None
-        blocked = is_ssrf_blocked(target)
-        if blocked:
+        literal_blocked = is_ssrf_blocked(target)
+        if literal_blocked:
             logger.warning(
                 "ssrf_blocked",
                 input=target,
@@ -202,7 +183,7 @@ async def resolve_target(target: str, reverse_dns: bool = False) -> dict:
             "hostname":  None,
             "ptr":       ptr,
             "resolved":  False,
-            "error":     "ssrf_blocked" if blocked else None,
+            "error":     "ssrf_blocked" if literal_blocked else None,
             "addresses": [target],
         }
 
@@ -262,7 +243,7 @@ def lookup_addresses(host: str) -> list[str]:
     infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     seen: list[str] = []
     for *_, sockaddr in infos:
-        addr = sockaddr[0]
+        addr = str(sockaddr[0])
         if addr not in seen:
             seen.append(addr)
     return seen

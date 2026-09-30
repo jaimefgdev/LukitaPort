@@ -222,3 +222,14 @@ def test_run_py_binds_loopback_by_default(monkeypatch):
     monkeypatch.setattr(uvicorn, "run", lambda *a, **k: calls.append(k))
     assert run.main() == 0
     assert calls[0]["host"] == "127.0.0.1" and calls[0]["workers"] == 1
+
+
+def test_invalid_setting_refuses_start(monkeypatch, capsys):
+    import run
+    import uvicorn
+
+    monkeypatch.setenv("LUKITA_RATE_LIMIT", "lots")
+    security.reset_settings()
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: pytest.fail("must not start"))
+    assert run.main() == 2
+    assert "LUKITA_RATE_LIMIT" in capsys.readouterr().err

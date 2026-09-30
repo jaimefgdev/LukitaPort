@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
 
 
 @dataclass
@@ -31,7 +31,7 @@ class LoopbackHTTPServer:
     port:     int = 0
     _server:  asyncio.AbstractServer | None = None
 
-    async def __aenter__(self) -> "LoopbackHTTPServer":
+    async def __aenter__(self) -> LoopbackHTTPServer:
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
         self.port = self._server.sockets[0].getsockname()[1]
         return self

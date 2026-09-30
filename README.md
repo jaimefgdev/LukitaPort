@@ -1,705 +1,91 @@
 # LukitaPort
 
-> **Advanced async port scanner with real-time UI, security audit, CVE lookup and enterprise-grade frontend architecture.**  
-> **Escáner de puertos asíncrono con UI en tiempo real, auditoría de seguridad, búsqueda de CVEs y arquitectura frontend de nivel enterprise.**
-
----
+> Escáner de puertos TCP asíncrono con interfaz web en tiempo real, auditoría HTTP/TLS, búsqueda de CVEs y exportación de informes.
+> *Async TCP port scanner with a real-time web UI, HTTP/TLS auditing, CVE lookup and report export — [English summary below](#english-summary).*
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11+-blue?style=flat-square&logo=python" />
-  <img src="https://img.shields.io/badge/FastAPI-0.111+-green?style=flat-square&logo=fastapi" />
-  <img src="https://img.shields.io/badge/Vanilla_JS-ES_Modules-yellow?style=flat-square&logo=javascript" />
-  <img src="https://img.shields.io/badge/CSP-script--src_'self'-red?style=flat-square" />
-  <img src="https://img.shields.io/badge/License-Educational-lightgrey?style=flat-square" />
+  <img src="https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?style=flat-square&logo=python" />
+  <img src="https://img.shields.io/badge/FastAPI-0.142-green?style=flat-square&logo=fastapi" />
+  <img src="https://img.shields.io/badge/UI-ES%20modules%2C%20sin%20build-yellow?style=flat-square&logo=javascript" />
+  <img src="https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square" />
 </p>
 
 ---
 
-## Table of Contents · Índice
+## ⚠️ Uso responsable
 
-- [English](#english)
-  - [Overview](#overview)
-  - [Features](#features)
-  - [Architecture](#architecture)
-  - [Requirements](#requirements)
-  - [Installation](#installation)
-  - [Configuration](#configuration)
-  - [Running](#running)
-  - [API Reference](#api-reference)
-  - [Frontend Modules](#frontend-modules)
-  - [Security Design](#security-design)
-  - [Export Formats](#export-formats)
-  - [Docker](#docker)
-  - [Project Structure](#project-structure)
-- [Español](#español)
-  - [Descripción general](#descripción-general)
-  - [Funcionalidades](#funcionalidades)
-  - [Arquitectura](#arquitectura)
-  - [Requisitos](#requisitos)
-  - [Instalación](#instalación)
-  - [Configuración](#configuración)
-  - [Ejecución](#ejecución)
-  - [Referencia de la API](#referencia-de-la-api)
-  - [Módulos del Frontend](#módulos-del-frontend)
-  - [Diseño de Seguridad](#diseño-de-seguridad)
-  - [Formatos de Exportación](#formatos-de-exportación)
-  - [Docker](#docker-1)
-  - [Estructura del Proyecto](#estructura-del-proyecto)
+LukitaPort es una herramienta **educativa** para analizar sistemas **propios o sobre los que tienes autorización expresa y por escrito**. Escanear, auditar o hacer capturas de sistemas ajenos sin permiso puede ser delito (en España, entre otros, el art. 197 bis del Código Penal) y suele violar las condiciones de uso de tu proveedor de red.
+
+- **No es anónima.** El objetivo ve tu dirección IP en cada conexión. El «modo sigiloso (lento)» solo reduce el ritmo y aleatoriza el orden y los tiempos; no oculta nada.
+- **Úsala en local.** Por defecto escucha solo en `127.0.0.1` y exige un token. No la publiques en Internet: cualquiera con acceso podría usar tu máquina para escanear a terceros.
+- **Redes internas bloqueadas por defecto.** Los destinos internos (loopback, RFC 1918, link-local, CGNAT, metadatos de la nube…) están bloqueados salvo con `ALLOW_PRIVATE_IPS=true`. Actívalo solo en un laboratorio que controles.
+- **Terceros**:
+  - Las búsquedas de CVE consultan la API pública del NVD y la enumeración de subdominios consulta crt.sh. En ambos casos solo se envía el producto, la versión o el dominio, nunca la IP del objetivo.
+  - La GeoIP está desactivada por defecto y, si se activa, es 100 % local.
 
 ---
 
-# English
+## Qué hace
 
-## Overview
-
-LukitaPort is a full-stack network reconnaissance tool built for **educational and authorised security research**. It streams port-scan results to the browser in real time over SSE, then automatically chains HTTP header auditing, technology fingerprinting, sensitive-path discovery, SSL/TLS analysis and NVD CVE lookup — all in a single, zero-dependency Vanilla JS frontend.
-
-The backend is a Python / FastAPI async server. The frontend is a CSP-compliant ES-module application with rAF-batched rendering capable of smoothly handling 65,535-port full scans at 60 FPS.
-
-> ⚠️ **For educational use only.** Only scan hosts you own or have explicit written permission to test.
-
----
-
-## Features
-
-### Scanning Engine
-- **Async TCP port scanner** — `asyncio` connect probes, configurable timeout and concurrency
-- **Scan modes** — Quick (top 100), Custom (user-defined range), Full (1–65535)
-- **Scan profiles** — Normal, Stealth (10 parallel probes, fixed 0.5 s delay), Aggressive (higher concurrency, capped by the open-files limit)
-- **Stealth (slow) mode** — `slow` profile: 3 parallel probes, random 0.5–3 s delays and random port order. It does **not** anonymise: the target still sees your IP
-- **Real-time SSE stream** — server pushes `meta`, `port`, `done` events; browser renders rows as they arrive
-- **GeoIP enrichment** — country, city, ASN, ISP, flag emoji from the resolved IP
-- **nmap fingerprinting** — version detection (`-sV`) on open ports via subprocess bridge
-
-### Security Audit (auto-launched on web ports 80, 443, 8080, 8443, 8888)
-- **HTTP headers audit** — scores A+ → F, grades missing/present/dangerous headers
-- **Technology detection** — ~60 signatures (servers, frameworks, CDNs, analytics) from JSON config
-- **Sensitive path scan** — probes admin panels, backups, config files, `.git`, `.env` etc.
-- **SSL/TLS analysis** — certificate chain, expiry, SANs, cipher, protocol versions, self-signed detection
-- **CVE lookup** — NVD (nvd.nist.gov) batch queries per detected service/version with CVSS scoring
-
-### Network Discovery & Recon
-- **ICMP/ping sweep** — live host discovery across a CIDR range (e.g. `192.168.1.0/24`)
-- **Subdomain enumeration** — crt.sh certificate transparency log lookup with DNS resolution
-- **Screenshot capture** — Playwright Chromium headless, shared browser instance (one process per server lifetime)
-
-### Exports
-- **JSON** — full structured report with geo, versions and risk ratings
-- **CSV** — flat table, quoted fields, comma-safe banners
-- **HTML** — self-contained single-file report with embedded styles
-- **Markdown** — server-rendered pentest-ready report
-- **PDF** — server-rendered report via WeasyPrint
-
-### Frontend Architecture
-- **ES Modules** — `state.js`, `ui.js`, `api.js`, `templates.js`, `export.js`, `main.js`
-- **rAF + DocumentFragment batching** — 60 FPS stable at 1,000 SSE events/second
-- **Smart auto-scroll** — only follows new rows if the user was already near the bottom
-- **Hermetic EventSource teardown** — null handlers before `.close()` on every scan stop (no memory leaks across repeated scans)
-- **CSP `script-src 'self'` compliant** — zero `onclick`/`onmouseover` attributes, event delegation via `data-action` map
-- **Non-blocking exports** — chunked `yieldToMain()` processing, 5,000 rows/chunk, spinner never freezes
-- **Anti-XSS** — `escapeHTML()` + `safeHref()` on every backend string before `innerHTML` injection
-- **i18n** — full ES / EN bilingual UI, switchable at runtime
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Browser (Vanilla JS ES Modules)                            │
-│  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌────────────┐   │
-│  │ state.js │ │  ui.js   │ │templates.js│ │  export.js │   │
-│  │ (store)  │ │ (render) │ │ (HTML tmpl)│ │ (chunked)  │   │
-│  └────┬─────┘ └────┬─────┘ └─────┬──────┘ └─────┬──────┘   │
-│       │             │              │               │          │
-│  ┌────┴─────────────┴──────────────┴───────────────┴──────┐  │
-│  │                   main.js  (event delegation)           │  │
-│  │              api.js  (SSE + fetch)                      │  │
-│  └─────────────────────────┬───────────────────────────────┘  │
-└────────────────────────────│────────────────────────────────┘
-                             │ HTTP / SSE
-┌────────────────────────────┴────────────────────────────────┐
-│  FastAPI (Python 3.11+)                                      │
-│  ┌────────────┐ ┌────────────┐ ┌──────────────┐             │
-│  │ scanner.py │ │ auditor.py │ │ ssl_analyzer │             │
-│  │(async TCP) │ │(headers+   │ │   .py        │             │
-│  │            │ │ paths+tech)│ └──────────────┘             │
-│  └────────────┘ └────────────┘ ┌──────────────┐             │
-│  ┌────────────┐ ┌────────────┐ │ cve_lookup   │             │
-│  │ resolver.py│ │scan_service│ │   .py (NVD)  │             │
-│  │(DNS+SSRF)  │ │.py (shots) │ └──────────────┘             │
-│  └────────────┘ └────────────┘                              │
-│  ┌────────────┐ ┌────────────┐ ┌──────────────┐             │
-│  │  cache.py  │ │  models.py │ │pdf_generator │             │
-│  │(TTL-LRU)   │ │ (Pydantic) │ │   .py        │             │
-│  └────────────┘ └────────────┘ └──────────────┘             │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Requirements
-
-### Backend
-| Dependency | Version | Purpose |
-|---|---|---|
-| Python | 3.11+ | Runtime |
-| FastAPI | 0.111+ | Web framework |
-| Uvicorn | 0.29+ | ASGI server |
-| aiohttp | 3.9+ | Async HTTP (audit, CVE) |
-| dnspython | 2.6+ | DNS resolution |
-| geoip2 | 4.x | GeoIP database |
-| WeasyPrint | 62+ | PDF generation |
-| Playwright | 1.44+ | Screenshots (optional) |
-| nmap | system | Fingerprinting (optional) |
-
-### Frontend
-No build step. No bundler. No npm. ES Modules loaded natively by the browser.
-
----
-
-## Installation
-
-### 1 · Clone
-
-```bash
-git clone https://github.com/jaimefg1888/lukitaport.git
-cd lukitaport
-```
-
-### 2 · Python environment
-
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 3 · Optional dependencies
-
-**Playwright** (screenshots):
-```bash
-pip install playwright
-playwright install chromium
-```
-
-**nmap** (fingerprinting):
-```bash
-# Debian / Ubuntu
-sudo apt install nmap
-
-# macOS
-brew install nmap
-
-# Windows
-winget install Insecure.Nmap
-```
-
-**GeoIP database** (geo enrichment):
-```bash
-# Download GeoLite2-City.mmdb from maxmind.com and place it in:
-./data/GeoLite2-City.mmdb
-```
-
-### 4 · Environment file
-
-```bash
-cp .env.example .env
-# Edit .env — see Configuration section below
-```
-
----
-
-## Configuration
-
-All configuration is through environment variables. Copy `.env.example` to `.env`.
-
-```dotenv
-# ── Access control (see security.py) ─────────────────────────────────────────
-# API token (≥ 16 chars). Optional on 127.0.0.1 — a random one is generated
-# and a login URL is printed at startup. MANDATORY on any other interface.
-LUKITA_API_TOKEN=
-LUKITA_HOST=127.0.0.1           # interface run.py listens on
-LUKITA_PORT=8000
-LUKITA_ALLOWED_HOSTS=           # Host header allow-list (default 127.0.0.1,localhost,::1)
-LUKITA_ENABLE_ADMIN=false       # /api/admin/* only exists when true
-LUKITA_RATE_LIMIT=120           # /api/ requests per client per minute
-LUKITA_MAX_BODY_BYTES=5242880
-
-# ── Resource limits (concurrent operations; extra requests get HTTP 429) ─────
-LUKITA_MAX_SCANS=2
-LUKITA_MAX_NMAP=1
-LUKITA_MAX_SCREENSHOTS=2
-LUKITA_MAX_AUDITS=2
-LUKITA_MAX_SSL=2
-
-# ── SSRF ─────────────────────────────────────────────────────────────────────
-# Allow scanning private/internal IP addresses. "true" ONLY for local labs.
-ALLOW_PRIVATE_IPS=false
-
-# ── GeoIP (off by default; local MaxMind GeoLite2 files only) ────────────────
-LUKITA_GEOIP_DB=                # e.g. ./data/GeoLite2-City.mmdb
-LUKITA_GEOIP_ASN_DB=            # optional GeoLite2-ASN.mmdb
-
-# ── Logging ──────────────────────────────────────────────────────────────────
-LOG_LEVEL=INFO
-```
-
-### ALLOW_PRIVATE_IPS — SSRF Protection
-
-| Value | Behaviour | Use case |
-|---|---|---|
-| `false` (default) | Blocks all RFC-1918, loopback, link-local, APIPA and reserved addresses. Returns HTTP 403. | Production, public-facing servers |
-| `true` | Allows scanning any IP including internal ones | Local lab, educational use |
-
-The SSRF check runs **after DNS resolution** to defend against DNS-rebinding attacks (a hostname that resolves to an internal IP is still blocked).
-
----
-
-## Running
-
-```bash
-python run.py
-```
-
-`run.py` listens on `127.0.0.1:8000` by default and prints a login URL with a
-token generated at each start (`http://127.0.0.1:8000/#token=…`) unless `LUKITA_API_TOKEN` is set, in
-which case the UI asks for the token. It refuses to listen on any other
-interface (`LUKITA_HOST=0.0.0.0`, a LAN IP…) without `LUKITA_API_TOKEN`.
-It always runs a single worker (scan slots, caches and the browser are
-per-process state).
-
-API clients can authenticate with `Authorization: Bearer <token>`.
-
----
-
-## API Reference
-
-All endpoints return JSON unless noted otherwise.
-
-### `GET /api/config`
-Returns the port risk map used by the frontend.
-
-### `GET /api/resolve?target={host}`
-Resolves a hostname or IP. Returns `{ ip, hostname, input }` or `{ error }`.  
-Returns **403** if the resolved IP is internal and `ALLOW_PRIVATE_IPS=false`.
-
-### `GET /api/geoip?target={host}`
-GeoIP lookup. Returns `{ country, city, asn, isp, flag }`.
-
-### `GET /api/scan` · SSE
-Streams port scan results as Server-Sent Events.
-
-**Query params:**
-| Param | Type | Default | Description |
-|---|---|---|---|
-| `target` | string | required | Host to scan |
-| `mode` | `quick\|custom\|full` | `quick` | Port range preset |
-| `profile` | `normal\|stealth\|aggressive\|slow` | `normal` | Scan behaviour |
-| `port_start` | int | 1 | Start of custom range |
-| `port_end` | int | 1024 | End of custom range |
-| `timeout` | float | 1.0 | Per-port timeout in seconds |
-
-**Event types:**
-```
-data: {"type": "meta",  "ip": "1.2.3.4", "hostname": "example.com", "total_ports": 100, "geo": {...}}
-data: {"type": "port",  "port": 80, "state": "open", "service": "http", "response_time_ms": 42, "scanned": 1, "progress": 1.0}
-data: {"type": "done"}
-data: {"type": "port",  "error": "ssrf_blocked", "status": 403}
-```
-
-### `GET /api/fingerprint?target={host}&ports={csv}`
-nmap `-sV` version detection on a list of open ports. Returns per-port `{ product, version, extrainfo, cpe }`.
-
-### `GET /api/audit?target={host}&open_ports={csv}`
-Full security audit. Returns `{ headers, technologies, paths }`.
-
-### `GET /api/ssl?target={host}&open_ports={csv}`
-SSL/TLS certificate analysis per HTTPS port.
-
-### `POST /api/cve/batch`
-NVD CVE batch lookup.  
-Body: `{ "80": { "name": "nginx", "version": "1.24.0" }, ... }`
-
-### `GET /api/discover?cidr={cidr}`
-ICMP ping sweep of a CIDR range. Returns `{ alive: [{ip, rtt_ms}], alive_count, total_hosts }`.
-
-### `GET /api/subdomains?domain={domain}`
-crt.sh + DNS resolution subdomain enumeration.
-
-### `POST /api/screenshot/capture?target={host}&port={port}`
-Trigger a Playwright screenshot in the background.
-
-### `GET /api/screenshot?target={host}`
-Retrieve a previously captured screenshot as `image/png`.
-
-### `POST /api/export/pdf`
-Server-side PDF report generation via WeasyPrint.
-
-### `POST /api/export/md`
-Server-side Markdown report generation.
-
-### `GET /api/admin/status`
-Health / readiness check. Returns Playwright status, cache stats, `allow_private_ips` value.
-
----
-
-## Frontend Modules
-
-| Module | Responsibility |
+| Función | Detalle |
 |---|---|
-| `state.js` | Single source of truth — `state` object, `getRisk()`, `initConfig()` |
-| `ui.js` | DOM helpers, toast, rendering (rAF batching, smart scroll), audit render, `copyText` |
-| `templates.js` | Pure template functions, `escapeHTML`, `safeHref`, zero inline handlers |
-| `api.js` | SSE scan lifecycle, hermetic EventSource teardown, all `fetch` calls |
-| `export.js` | Chunked async exports (JSON, CSV, HTML) + server-side PDF / Markdown |
-| `main.js` | App entry point, event delegation (`data-action` map), static listeners |
-
-### Event Delegation
-
-Instead of `onclick` attributes, all dynamically-rendered interactive elements use `data-action`:
-
-```html
-<!-- Copy button (no onclick) -->
-<button data-action="copy" data-copy-text="nginx config here">Copy nginx</button>
-
-<!-- Scan a discovered host (no onclick) -->
-<div data-action="scan-host" data-host="192.168.1.1">192.168.1.1</div>
-
-<!-- Launch CVE lookup (no onclick, no window.* global) -->
-<button data-action="launch-cve">Search CVEs</button>
-```
-
-A single listener on `document.body` dispatches to `_ACTION_HANDLERS`:
-
-```js
-document.body.addEventListener('click', e => {
-    const el = e.target.closest('[data-action]');
-    if (el) _ACTION_HANDLERS[el.dataset.action]?.(el, e);
-});
-```
-
----
-
-## Security Design
-
-### SSRF Prevention (`resolver.py`)
-Checks resolved IP against six `ipaddress` properties before any connection is made:
-
-| Property | Covers |
-|---|---|
-| `is_loopback` | `127.0.0.0/8`, `::1` |
-| `is_private` | `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` |
-| `is_link_local` | `169.254.0.0/16` (incl. AWS metadata `169.254.169.254`), `fe80::/10` |
-| `is_reserved` | `0.0.0.0/8`, `240.0.0.0/4` |
-| `is_multicast` | `224/4`, `ff00::/8` |
-| `is_unspecified` | `0.0.0.0`, `::` |
-
-The check runs post-DNS so a hostname that DNS-rebinds to `10.0.0.1` is still blocked.
-
-### CSP Compliance (`templates.js`, `main.js`)
-The frontend is fully compatible with:
-```
-Content-Security-Policy: default-src 'self'; script-src 'self'
-```
-- Zero `onclick`, `onmouseover`, `onmouseout` attributes in any generated HTML
-- Zero `window.*` global function assignments
-- Hover states for dynamic components delivered via CSS class (`.btn-cve-launch:hover`)
-- Screenshot blob URLs created with `URL.createObjectURL()`, appended via DOM API
-
-### Anti-XSS (`templates.js`)
-Every backend string entering `innerHTML` passes through `escapeHTML()` (replaces `& < > " '`).  
-External URLs pass through `safeHref()` (rejects `javascript:`, `data:`, `vbscript:`).
-
-### Memory Safety (`api.js`)
-EventSource teardown on every scan stop:
-```js
-es.onmessage = null;  // 1. Null handlers first (breaks GC root)
-es.onerror   = null;
-es.onopen    = null;
-es.close();           // 2. Close TCP stream
-state.eventSource = null; // 3. Release JS reference
-```
-
----
-
-## Export Formats
-
-| Format | Engine | Blocking? | Notes |
-|---|---|---|---|
-| JSON | Client-side | No (chunked) | Full report with geo, risk, versions |
-| CSV | Client-side | No (chunked) | Quoted fields, comma-safe banners |
-| HTML | Client-side | No (chunked + prebuilt rows) | Self-contained, no external deps |
-| Markdown | Server-side | No (async fetch) | Pentest-report structure |
-| PDF | Server-side | No (async fetch) | WeasyPrint, styled report |
-
-All client-side exports use `yieldToMain()` (setTimeout 0 ms) every 5,000 rows to keep the UI responsive during large exports.
-
----
-
-## Docker
-
-```bash
-export LUKITA_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-docker compose up --build
-```
-
-Then open `http://127.0.0.1:8000` and enter the token. The compose file
-publishes the port on `127.0.0.1` only, refuses to start without
-`LUKITA_API_TOKEN`, runs as an unprivileged user with all capabilities
-dropped, a read-only filesystem and `no-new-privileges`.
-
----
-
-## Project Structure
-
-```
-lukitaport/
-│
-├── main.py                  # FastAPI app, all endpoints, lifespan
-├── scanner.py               # Async TCP port scanner
-├── auditor.py               # HTTP headers + tech detection + path scan
-├── ssl_analyzer.py          # SSL/TLS certificate analysis
-├── cve_lookup.py            # NVD API client with exponential backoff
-├── scan_service.py          # Screenshot capture, GeoIP, nmap bridge
-├── resolver.py              # DNS resolution + SSRF protection
-├── cache.py                 # TTL-LRU screenshot cache
-├── models.py                # Pydantic v2 request/response models
-├── config.py                # PORT_RISK map
-├── logging_config.py        # Structured JSON logging
-├── pdf_generator.py         # WeasyPrint PDF renderer
-├── tech_signatures.json     # Technology detection signatures
-│
-├── static/                  # Frontend (served by FastAPI)
-│   ├── index.html
-│   ├── styles.css
-│   ├── state.js
-│   ├── ui.js
-│   ├── api.js
-│   ├── templates.js
-│   ├── export.js
-│   └── main.js
-│
-├── data/
-│   └── GeoLite2-City.mmdb   # MaxMind GeoIP database (not included)
-│
-├── .env.example
-├── requirements.txt
-├── Dockerfile
-└── docker-compose.yml
-```
-
----
-
----
-
-# Español
-
-## Descripción general
-
-LukitaPort es una herramienta de reconocimiento de red full-stack diseñada para **uso educativo e investigación de seguridad autorizada**. Envía resultados de escaneo de puertos al navegador en tiempo real mediante SSE y encadena automáticamente auditoría de cabeceras HTTP, fingerprinting de tecnologías, descubrimiento de rutas sensibles, análisis SSL/TLS y búsqueda de CVEs en NVD — todo en un frontend Vanilla JS de cero dependencias.
-
-El backend es un servidor Python/FastAPI asíncrono. El frontend es una aplicación de ES Modules compatible con CSP, con renderizado en lotes mediante rAF que gestiona escaneos completos de 65.535 puertos a 60 FPS de forma fluida.
-
-> ⚠️ **Solo para uso educativo.** Escanea únicamente hosts que sean de tu propiedad o para los que tengas permiso escrito explícito.
-
----
-
-## Funcionalidades
-
-### Motor de Escaneo
-- **Escáner TCP asíncrono** — sondas de conexión `asyncio`, timeout y concurrencia configurables
-- **Modos de escaneo** — Rápido (top 100), Personalizado (rango definido por el usuario), Completo (1–65535)
-- **Perfiles** — Normal, Discreto/Stealth (10 sondas en paralelo, retardo fijo de 0,5 s), Agresivo (más concurrencia, limitada por el máximo de ficheros abiertos)
-- **Modo sigiloso (lento)** — perfil `slow`: 3 sondas en paralelo, retardos aleatorios de 0,5–3 s y puertos en orden aleatorio. **No anonimiza**: el objetivo sigue viendo tu IP
-- **Stream SSE en tiempo real** — el servidor envía eventos `meta`, `port`, `done`; el navegador renderiza filas al recibirlos
-- **Enriquecimiento GeoIP** — país, ciudad, ASN, ISP, emoji de bandera desde la IP resuelta
-- **Fingerprinting con nmap** — detección de versiones (`-sV`) en puertos abiertos mediante subproceso
-
-### Auditoría de Seguridad (lanzada automáticamente en puertos web 80, 443, 8080, 8443, 8888)
-- **Auditoría de cabeceras HTTP** — puntuación de A+ a F, clasifica cabeceras ausentes/presentes/peligrosas
-- **Detección de tecnologías** — ~60 firmas (servidores, frameworks, CDNs, analíticas) desde config JSON
-- **Escaneo de rutas sensibles** — sondea paneles admin, backups, ficheros de configuración, `.git`, `.env`, etc.
-- **Análisis SSL/TLS** — cadena de certificados, caducidad, SANs, cifrado, versiones de protocolo, detección de autofirmados
-- **Búsqueda de CVEs** — consultas por lotes a NVD (nvd.nist.gov) por servicio/versión detectados con puntuación CVSS
-
-### Descubrimiento de Red y Reconocimiento
-- **Barrido ICMP/ping** — descubrimiento de hosts activos en un rango CIDR (p.ej. `192.168.1.0/24`)
-- **Enumeración de subdominios** — consulta a logs de transparencia de certificados crt.sh con resolución DNS
-- **Captura de capturas de pantalla** — Playwright Chromium headless, instancia de browser compartida (un proceso por vida del servidor)
-
-### Exportaciones
-- **JSON** — informe estructurado completo con geo, versiones y clasificaciones de riesgo
-- **CSV** — tabla plana, campos entrecomillados, banners seguros ante comas
-- **HTML** — informe autocontenido en un único fichero con estilos embebidos
-- **Markdown** — informe renderizado en servidor listo para pentesting
-- **PDF** — informe renderizado en servidor via WeasyPrint
-
-### Arquitectura Frontend
-- **ES Modules** — `state.js`, `ui.js`, `api.js`, `templates.js`, `export.js`, `main.js`
-- **Batching rAF + DocumentFragment** — 60 FPS estables a 1.000 eventos SSE por segundo
-- **Auto-scroll inteligente** — solo sigue las nuevas filas si el usuario ya estaba cerca del fondo
-- **Teardown hermético del EventSource** — null de handlers antes de `.close()` en cada parada de escaneo (sin fugas de memoria entre escaneos sucesivos)
-- **Cumplimiento CSP `script-src 'self'`** — cero atributos `onclick`/`onmouseover`, delegación de eventos via mapa `data-action`
-- **Exportaciones no bloqueantes** — procesamiento por chunks con `yieldToMain()`, 5.000 filas por chunk, el spinner nunca se congela
-- **Anti-XSS** — `escapeHTML()` + `safeHref()` en cada string del backend antes de inyectarlo en `innerHTML`
-- **i18n** — UI bilingüe ES/EN completa, switchable en tiempo de ejecución
+| **Escaneo TCP** | Connect scan asíncrono con resultados en streaming (SSE). Modos: rápido (30 puertos comunes), rango personalizado y completo (1–65535). Estados `open` / `closed` / `filtered` según `errno`. Captura de banners. |
+| **Perfiles** | `normal` (100 sondas en paralelo), `stealth` / «Discreto» (10, con 0,5 s de pausa), `aggressive` (1000, limitado por el máximo de ficheros abiertos) y `slow` / «Sigiloso (lento)» (3 sondas, retardos aleatorios de 0,5–3 s, puertos en orden aleatorio). |
+| **Fingerprinting** | `nmap -sV` sobre los puertos abiertos (requiere nmap instalado). |
+| **Auditoría HTTP** | Cabeceras de seguridad (nota A–F), cabeceras que filtran información, detección de tecnologías (`tech_signatures.json`) y rutas sensibles (`/.git/HEAD`, `/.env`, paneles…). |
+| **Análisis TLS** | Certificado (sujeto, emisor, SAN, caducidad), validez de la cadena, versiones TLS 1.0–1.3 aceptadas, cifrado y nota A+–F. |
+| **CVEs** | Consulta al NVD por CPE (si nmap lo detecta) o por «producto versión». Respeta el límite de peticiones y admite `NVD_API_KEY`. |
+| **Descubrimiento de red** | Ping sweep de redes IPv4 de /22 o más pequeñas. |
+| **Subdominios** | Certificate Transparency (crt.sh) con resolución DNS. |
+| **Capturas web** | Chromium sin interfaz (Playwright), opcional. |
+| **Exportación** | JSON, CSV (sin inyección de fórmulas), HTML, Markdown y PDF. |
+| **GeoIP** | Opcional y local con MaxMind GeoLite2. |
 
 ---
 
 ## Arquitectura
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Navegador (Vanilla JS ES Modules)                          │
-│  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌────────────┐   │
-│  │ state.js │ │  ui.js   │ │templates.js│ │  export.js │   │
-│  │ (estado) │ │(renderiz)│ │(plantillas)│ │ (por chunks│   │
-│  └────┬─────┘ └────┬─────┘ └─────┬──────┘ └─────┬──────┘   │
-│       │             │              │               │          │
-│  ┌────┴─────────────┴──────────────┴───────────────┴──────┐  │
-│  │             main.js  (delegación de eventos)            │  │
-│  │           api.js  (SSE + fetch)                         │  │
-│  └─────────────────────────┬───────────────────────────────┘  │
-└────────────────────────────│────────────────────────────────┘
-                             │ HTTP / SSE
-┌────────────────────────────┴────────────────────────────────┐
-│  FastAPI (Python 3.11+)                                      │
-│  ┌────────────┐ ┌────────────┐ ┌──────────────┐             │
-│  │ scanner.py │ │ auditor.py │ │ ssl_analyzer │             │
-│  │ (TCP asíc.)│ │(cabeceras+ │ │   .py        │             │
-│  │            │ │rutas+tech) │ └──────────────┘             │
-│  └────────────┘ └────────────┘ ┌──────────────┐             │
-│  ┌────────────┐ ┌────────────┐ │ cve_lookup   │             │
-│  │ resolver.py│ │scan_service│ │   .py (NVD)  │             │
-│  │(DNS+SSRF)  │ │.py (shots) │ └──────────────┘             │
-│  └────────────┘ └────────────┘                              │
-│  ┌────────────┐ ┌────────────┐ ┌──────────────┐             │
-│  │  cache.py  │ │  models.py │ │pdf_generator │             │
-│  │(TTL-LRU)   │ │ (Pydantic) │ │   .py        │             │
-│  └────────────┘ └────────────┘ └──────────────┘             │
-└─────────────────────────────────────────────────────────────┘
+Navegador (ES modules, sin build)  ──HTTP/SSE──▶  FastAPI (main.py)
+                                                   │  SecurityMiddleware: token, Host, CSP, rate limit
+                                                   ├─ scanner.py        pool de workers asíncrono
+                                                   ├─ resolver.py       DNS asíncrono + política SSRF + IP fijada
+                                                   ├─ safe_http.py      HTTP saliente: IP fijada, redirecciones validadas
+                                                   ├─ auditor.py        cabeceras, tecnologías, rutas
+                                                   ├─ ssl_analyzer.py   certificado y versiones TLS
+                                                   ├─ cve_lookup.py     cliente NVD (caché, back-off)
+                                                   ├─ scan_service.py   nmap, ping, crt.sh, capturas, Markdown
+                                                   └─ pdf_generator.py  informe PDF (ReportLab)
 ```
 
----
+Detalles relevantes:
 
-## Requisitos
-
-### Backend
-| Dependencia | Versión | Uso |
-|---|---|---|
-| Python | 3.11+ | Runtime |
-| FastAPI | 0.111+ | Framework web |
-| Uvicorn | 0.29+ | Servidor ASGI |
-| aiohttp | 3.9+ | HTTP asíncrono (auditoría, CVE) |
-| dnspython | 2.6+ | Resolución DNS |
-| geoip2 | 4.x | Base de datos GeoIP |
-| WeasyPrint | 62+ | Generación de PDF |
-| Playwright | 1.44+ | Capturas de pantalla (opcional) |
-| nmap | sistema | Fingerprinting (opcional) |
-
-### Frontend
-Sin build. Sin bundler. Sin npm. ES Modules cargados nativamente por el navegador.
+- **Concurrencia**:
+  - El escaneo usa un número fijo de workers. Si el cliente se desconecta, todas las sondas se cancelan.
+  - Las operaciones pesadas tienen un número máximo de ejecuciones simultáneas (`LUKITA_MAX_*`); cuando se alcanza, la API responde 429.
+- **SSRF**:
+  - Cada objetivo se resuelve una sola vez y se comprueban todas sus direcciones.
+  - Todas las conexiones posteriores van a la IP fijada; el hostname solo viaja como `Host`/SNI.
+  - Las redirecciones se validan salto a salto.
+  - Chromium no accede a la red directamente: todas sus peticiones pasan por el mismo filtro.
+- **Errores**: siempre con el formato `{"ok": false, "error": "<código>", "detail": "<mensaje>"}` y el código HTTP que corresponda (400, 401, 403, 404, 422, 429, 500, 502, 503).
 
 ---
 
 ## Instalación
 
-### 1 · Clonar
+Requisitos: **Python 3.11 o 3.12**. Opcionales: **nmap** (fingerprinting) y **Chromium vía Playwright** (capturas).
 
 ```bash
-git clone https://github.com/jaimefg1888/lukitaport.git
-cd lukitaport
+git clone https://github.com/jaimefgdev/LukitaPort.git
+cd LukitaPort
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt          # versiones fijadas y verificadas por hash
+playwright install --with-deps chromium  # opcional: capturas de pantalla
+sudo apt install nmap                    # opcional: fingerprinting (brew/winget en macOS/Windows)
 ```
 
-### 2 · Entorno Python
-
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 3 · Dependencias opcionales
-
-**Playwright** (capturas de pantalla):
-```bash
-pip install playwright
-playwright install chromium
-```
-
-**nmap** (fingerprinting):
-```bash
-# Debian / Ubuntu
-sudo apt install nmap
-
-# macOS
-brew install nmap
-
-# Windows
-winget install Insecure.Nmap
-```
-
-**Base de datos GeoIP** (enriquecimiento geográfico):
-```bash
-# Descarga GeoLite2-City.mmdb desde maxmind.com y colócala en:
-./data/GeoLite2-City.mmdb
-```
-
-### 4 · Fichero de entorno
-
-```bash
-cp .env.example .env
-# Edita .env — consulta la sección Configuración a continuación
-```
-
----
-
-## Configuración
-
-Toda la configuración se realiza mediante variables de entorno. Copia `.env.example` a `.env`.
-
-```dotenv
-# ── Control de acceso (ver security.py) ──────────────────────────────────────
-# Token de la API (≥ 16 caracteres). Opcional en 127.0.0.1: se genera uno
-# aleatorio y se imprime una URL de acceso al arrancar. OBLIGATORIO en otra interfaz.
-LUKITA_API_TOKEN=
-LUKITA_HOST=127.0.0.1           # interfaz en la que escucha run.py
-LUKITA_PORT=8000
-LUKITA_ALLOWED_HOSTS=           # Hosts permitidos (defecto 127.0.0.1,localhost,::1)
-LUKITA_ENABLE_ADMIN=false       # /api/admin/* solo existe si es true
-LUKITA_RATE_LIMIT=120           # peticiones /api/ por cliente y minuto
-LUKITA_MAX_BODY_BYTES=5242880
-
-# ── Límites (operaciones simultáneas; el exceso recibe HTTP 429) ─────────────
-LUKITA_MAX_SCANS=2
-LUKITA_MAX_NMAP=1
-LUKITA_MAX_SCREENSHOTS=2
-LUKITA_MAX_AUDITS=2
-LUKITA_MAX_SSL=2
-
-# ── SSRF ─────────────────────────────────────────────────────────────────────
-# Permite escanear IPs privadas/internas. "true" SOLO en laboratorios locales.
-ALLOW_PRIVATE_IPS=false
-
-# ── GeoIP (desactivada por defecto; solo ficheros locales GeoLite2) ──────────
-LUKITA_GEOIP_DB=                # p. ej. ./data/GeoLite2-City.mmdb
-LUKITA_GEOIP_ASN_DB=            # GeoLite2-ASN.mmdb opcional
-
-# ── Logging ──────────────────────────────────────────────────────────────────
-LOG_LEVEL=INFO
-```
-
-### ALLOW_PRIVATE_IPS — Protección contra SSRF
-
-| Valor | Comportamiento | Caso de uso |
-|---|---|---|
-| `false` (defecto) | Bloquea todas las IPs RFC-1918, loopback, link-local, APIPA y reservadas. Devuelve HTTP 403. | Producción, servidores públicos |
-| `true` | Permite escanear cualquier IP incluyendo las internas | Lab local, uso educativo |
-
-La verificación SSRF se ejecuta **después de la resolución DNS** para defenderse de ataques de DNS-rebinding (un hostname que resuelve a una IP interna sigue siendo bloqueado).
-
----
+`requirements.txt` y `requirements-dev.txt` se generan con `pip-compile` a partir de `pyproject.toml` (ver [Desarrollo](#desarrollo)).
 
 ## Ejecución
 
@@ -707,234 +93,139 @@ La verificación SSRF se ejecuta **después de la resolución DNS** para defende
 python run.py
 ```
 
-`run.py` escucha en `127.0.0.1:8000` por defecto e imprime una URL de acceso
-con un token generado en cada arranque (`http://127.0.0.1:8000/#token=…`), salvo que esté definido
-`LUKITA_API_TOKEN`, en cuyo caso la interfaz pide el token. Se niega a
-escuchar en cualquier otra interfaz (`LUKITA_HOST=0.0.0.0`, una IP de la
-LAN…) sin `LUKITA_API_TOKEN`. Siempre usa un único worker.
+- **Interfaz y token**:
+  - Escucha en `http://127.0.0.1:8000`.
+  - Si no hay `LUKITA_API_TOKEN`, genera un token en cada arranque e imprime una URL de acceso (`http://127.0.0.1:8000/#token=…`). El token va en el fragmento, que el navegador no envía al servidor.
+  - Si defines `LUKITA_API_TOKEN`, la interfaz te lo pide.
+- **Otras interfaces**: `run.py` **se niega a arrancar** en cualquier otra interfaz (`LUKITA_HOST=0.0.0.0`, una IP de la LAN…) si no has definido `LUKITA_API_TOKEN`.
+- **Clientes de la API**: pueden autenticarse con `Authorization: Bearer <token>`. El esquema OpenAPI está en `/openapi.json` (Swagger UI está desactivado porque cargaría scripts de un CDN que la CSP prohíbe).
 
-Los clientes de la API pueden autenticarse con `Authorization: Bearer <token>`.
+## Configuración
 
----
+Todas las variables, con sus valores por defecto, están en [`.env.example`](.env.example). Un valor inválido detiene el arranque con un mensaje claro. Las más importantes:
 
-## Referencia de la API
-
-Todos los endpoints devuelven JSON salvo indicación contraria.
-
-### `GET /api/config`
-Devuelve el mapa de riesgo de puertos usado por el frontend.
-
-### `GET /api/resolve?target={host}`
-Resuelve un hostname o IP. Devuelve `{ ip, hostname, input }` o `{ error }`.  
-Devuelve **403** si la IP resuelta es interna y `ALLOW_PRIVATE_IPS=false`.
-
-### `GET /api/geoip?target={host}`
-Consulta GeoIP. Devuelve `{ country, city, asn, isp, flag }`.
-
-### `GET /api/scan` · SSE
-Envía los resultados del escaneo como Server-Sent Events.
-
-**Parámetros query:**
-| Parámetro | Tipo | Defecto | Descripción |
-|---|---|---|---|
-| `target` | string | obligatorio | Host a escanear |
-| `mode` | `quick\|custom\|full` | `quick` | Preset de rango de puertos |
-| `profile` | `normal\|stealth\|aggressive\|slow` | `normal` | Comportamiento del escaneo |
-| `port_start` | int | 1 | Inicio del rango personalizado |
-| `port_end` | int | 1024 | Fin del rango personalizado |
-| `timeout` | float | 1.0 | Timeout por puerto en segundos |
-
-**Tipos de evento:**
-```
-data: {"type": "meta",  "ip": "1.2.3.4", "hostname": "ejemplo.com", "total_ports": 100, "geo": {...}}
-data: {"type": "port",  "port": 80, "state": "open", "service": "http", "response_time_ms": 42, ...}
-data: {"type": "done"}
-data: {"type": "port",  "error": "ssrf_blocked", "status": 403}
-```
-
-### `GET /api/fingerprint?target={host}&ports={csv}`
-Detección de versiones nmap `-sV` sobre una lista de puertos abiertos.
-
-### `GET /api/audit?target={host}&open_ports={csv}`
-Auditoría de seguridad completa. Devuelve `{ headers, technologies, paths }`.
-
-### `GET /api/ssl?target={host}&open_ports={csv}`
-Análisis de certificados SSL/TLS por puerto HTTPS.
-
-### `POST /api/cve/batch`
-Búsqueda por lotes de CVEs en NVD.  
-Cuerpo: `{ "80": { "name": "nginx", "version": "1.24.0" }, ... }`
-
-### `GET /api/discover?cidr={cidr}`
-Barrido ping ICMP en un rango CIDR. Devuelve `{ alive: [{ip, rtt_ms}], ... }`.
-
-### `GET /api/subdomains?domain={domain}`
-Enumeración de subdominios vía crt.sh + resolución DNS.
-
-### `POST /api/screenshot/capture?target={host}&port={port}`
-Lanza una captura de pantalla Playwright en segundo plano.
-
-### `GET /api/screenshot?target={host}`
-Recupera una captura de pantalla previa como `image/png`.
-
-### `POST /api/export/pdf`
-Generación de informe PDF en servidor via WeasyPrint.
-
-### `POST /api/export/md`
-Generación de informe Markdown en servidor.
-
-### `GET /api/admin/status`
-Health check. Devuelve estado de Playwright, estadísticas de caché, valor de `allow_private_ips`.
-
----
-
-## Módulos del Frontend
-
-| Módulo | Responsabilidad |
-|---|---|
-| `state.js` | Fuente única de verdad — objeto `state`, `getRisk()`, `initConfig()` |
-| `ui.js` | Helpers DOM, toast, renderizado (batching rAF, scroll inteligente), render de auditoría, `copyText` |
-| `templates.js` | Funciones de plantilla puras, `escapeHTML`, `safeHref`, cero handlers inline |
-| `api.js` | Ciclo de vida del SSE, teardown hermético del EventSource, todas las llamadas `fetch` |
-| `export.js` | Exportaciones asíncronas por chunks (JSON, CSV, HTML) + PDF/Markdown en servidor |
-| `main.js` | Punto de entrada, delegación de eventos (mapa `data-action`), listeners estáticos |
-
-### Delegación de Eventos
-
-En lugar de atributos `onclick`, todos los elementos interactivos renderizados dinámicamente usan `data-action`:
-
-```html
-<!-- Botón copiar (sin onclick) -->
-<button data-action="copy" data-copy-text="config nginx aquí">Copiar nginx</button>
-
-<!-- Escanear host descubierto (sin onclick) -->
-<div data-action="scan-host" data-host="192.168.1.1">192.168.1.1</div>
-
-<!-- Lanzar búsqueda CVE (sin onclick, sin global window.*) -->
-<button data-action="launch-cve">Buscar CVEs</button>
-```
-
-Un único listener en `document.body` despacha a `_ACTION_HANDLERS`:
-
-```js
-document.body.addEventListener('click', e => {
-    const el = e.target.closest('[data-action]');
-    if (el) _ACTION_HANDLERS[el.dataset.action]?.(el, e);
-});
-```
-
----
-
-## Diseño de Seguridad
-
-### Prevención SSRF (`resolver.py`)
-Verifica la IP resuelta contra seis propiedades de `ipaddress` antes de realizar cualquier conexión:
-
-| Propiedad | Cubre |
-|---|---|
-| `is_loopback` | `127.0.0.0/8`, `::1` |
-| `is_private` | `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` |
-| `is_link_local` | `169.254.0.0/16` (incl. metadata AWS `169.254.169.254`), `fe80::/10` |
-| `is_reserved` | `0.0.0.0/8`, `240.0.0.0/4` |
-| `is_multicast` | `224/4`, `ff00::/8` |
-| `is_unspecified` | `0.0.0.0`, `::` |
-
-La verificación se ejecuta post-DNS, por lo que un hostname que DNS-rebinda a `10.0.0.1` sigue siendo bloqueado.
-
-### Cumplimiento CSP (`templates.js`, `main.js`)
-El frontend es totalmente compatible con:
-```
-Content-Security-Policy: default-src 'self'; script-src 'self'
-```
-- Cero atributos `onclick`, `onmouseover`, `onmouseout` en ningún HTML generado
-- Cero asignaciones de funciones globales `window.*`
-- Estados hover de componentes dinámicos entregados via clase CSS (`.btn-cve-launch:hover`)
-- URLs blob de capturas de pantalla creadas con `URL.createObjectURL()`, añadidas via API DOM
-
-### Anti-XSS (`templates.js`)
-Cada string del backend que entra en `innerHTML` pasa por `escapeHTML()` (reemplaza `& < > " '`).  
-Las URLs externas pasan por `safeHref()` (rechaza `javascript:`, `data:`, `vbscript:`).
-
-### Seguridad de Memoria (`api.js`)
-Teardown del EventSource en cada parada de escaneo:
-```js
-es.onmessage = null;  // 1. Null handlers primero (rompe la raíz del GC)
-es.onerror   = null;
-es.onopen    = null;
-es.close();           // 2. Cierra el stream TCP
-state.eventSource = null; // 3. Libera la referencia JS
-```
-
----
-
-## Formatos de Exportación
-
-| Formato | Motor | ¿Bloqueante? | Notas |
-|---|---|---|---|
-| JSON | Cliente | No (por chunks) | Informe completo con geo, riesgo, versiones |
-| CSV | Cliente | No (por chunks) | Campos entrecomillados, banners seguros |
-| HTML | Cliente | No (chunks + filas preconstruidas) | Autocontenido, sin dependencias externas |
-| Markdown | Servidor | No (fetch asíncrono) | Estructura de informe de pentest |
-| PDF | Servidor | No (fetch asíncrono) | WeasyPrint, informe con estilos |
-
-Todas las exportaciones del lado cliente usan `yieldToMain()` (setTimeout 0 ms) cada 5.000 filas para mantener la UI responsiva durante exportaciones grandes.
-
----
+| Variable | Defecto | Uso |
+|---|---|---|
+| `LUKITA_API_TOKEN` | *(generado)* | Token de la API, de 16 caracteres o más. Obligatorio fuera de loopback. |
+| `LUKITA_HOST` / `LUKITA_PORT` | `127.0.0.1` / `8000` | Interfaz y puerto de `run.py`. |
+| `LUKITA_ALLOWED_HOSTS` | `127.0.0.1,localhost,::1` | Cabeceras `Host` aceptadas (anti DNS rebinding). |
+| `ALLOW_PRIVATE_IPS` | `false` | Permite objetivos internos. Solo para laboratorios propios. |
+| `LUKITA_ENABLE_ADMIN` | `false` | Activa `/api/admin/*`. |
+| `LUKITA_RATE_LIMIT` | `120` | Peticiones `/api/` por cliente y minuto. |
+| `LUKITA_MAX_SCANS`, `…_NMAP`, `…_SCREENSHOTS`, `…_AUDITS`, `…_SSL` | `2, 1, 2, 2, 2` | Operaciones simultáneas. |
+| `LUKITA_GEOIP_DB`, `LUKITA_GEOIP_ASN_DB` | — | Rutas a GeoLite2-City y GeoLite2-ASN. Activan la GeoIP local. |
+| `NVD_API_KEY` | — | Clave del NVD: menos espera entre consultas. |
+| `LOG_LEVEL` | `INFO` | Logs en JSON por stdout. |
 
 ## Docker
 
 ```bash
 export LUKITA_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 docker compose up --build
+# Imagen «lite» sin Chromium (≈1 GB menos, sin capturas):
+WITH_SCREENSHOTS=false docker compose up --build
 ```
 
-Después abre `http://127.0.0.1:8000` e introduce el token. El compose publica
-el puerto solo en `127.0.0.1`, se niega a arrancar sin `LUKITA_API_TOKEN` y
-ejecuta la app con un usuario sin privilegios, sin capabilities, con sistema
-de ficheros de solo lectura y `no-new-privileges`.
+- **Acceso**: abre `http://127.0.0.1:8000` e introduce el token.
+- **Endurecimiento del compose**:
+  - Publica el puerto solo en `127.0.0.1` y no arranca sin token.
+  - Usuario sin privilegios, sin capabilities, sistema de ficheros de solo lectura (`/tmp` en tmpfs) y `no-new-privileges`.
+  - Healthcheck contra `/api/health`.
+- **GeoIP**: monta los ficheros `.mmdb` y define `LUKITA_GEOIP_DB` (ver comentarios en `docker-compose.yml`).
+
+## API (resumen)
+
+Todas las rutas `/api/` requieren el token, salvo `/api/auth`, `/api/auth/status` y `/api/health`.
+
+| Método y ruta | Descripción |
+|---|---|
+| `GET /api/scan?target=&mode=&profile=&port_start=&port_end=&timeout=` | Escaneo por SSE: eventos `meta`, `port`, `done` o `cancelled`, o `{error, status}`. |
+| `GET /api/resolve?target=` | Resolución con política SSRF (403 si es interno). |
+| `GET /api/fingerprint?target=&ports=` | nmap `-sV` (máximo 100 puertos). |
+| `GET /api/audit?target=&open_ports=` | Auditoría HTTP. |
+| `GET /api/ssl?target=&open_ports=` | Análisis TLS de los puertos 443 y 8443. |
+| `GET /api/cve?service=&version=&cpe=` / `POST /api/cve/batch` | CVEs del NVD (el lote admite hasta 20 puertos). |
+| `GET /api/discover?cidr=&max_hosts=` | Ping sweep (IPv4, /22 o más pequeña). |
+| `GET /api/subdomains?domain=` | Subdominios vía crt.sh. |
+| `POST /api/screenshot/capture?target=&port=` / `GET /api/screenshot?target=` | Captura en segundo plano (503 si no hay Playwright). |
+| `GET /api/geoip?target=` | GeoIP local (`enabled: false` si no está configurada). |
+| `POST /api/export/md` / `POST /api/export/pdf` | Informes. |
+| `POST /api/auth`, `GET /api/auth/status`, `POST /api/auth/logout` | Sesión del navegador: cookie HttpOnly con SameSite=Strict. |
+
+## Desarrollo
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest               # tests de Python
+node --test 'frontend/tests/*.test.mjs'   # tests del frontend (Node 22)
+ruff check . && mypy .         # lint y tipos
+pip-audit -r requirements.txt  # vulnerabilidades conocidas
+```
+
+**Regla de las pruebas:**
+- Nunca se escanea ni se contacta un host externo. Los tests usan solo `127.0.0.1` con servidores que levanta el propio test, o sockets, DNS y subprocesos simulados.
+- `tests/conftest.py` lo impone: un `connect` fuera de loopback, una resolución DNS de un nombre externo o un subproceso hacen fallar el test.
+
+**Actualizar dependencias:** edita `pyproject.toml` y regenera los ficheros de bloqueo:
+
+```bash
+pip-compile --strip-extras --generate-hashes --allow-unsafe --extra screenshots -o requirements.txt pyproject.toml
+pip-compile --strip-extras --generate-hashes --allow-unsafe --extra screenshots --extra dev -o requirements-dev.txt pyproject.toml
+```
+
+**CI** (GitHub Actions): ruff, mypy, pytest (3.11 y 3.12), pip-audit, tests del frontend y construcción de la imagen lite con una prueba de arranque.
+
+## Estructura
+
+```
+├── main.py            API FastAPI (rutas, errores, lifespan)
+├── run.py             arranque recomendado (valida interfaz y token)
+├── settings.py        configuración (pydantic-settings)
+├── security.py        token, sesión, Host, CSP, rate limit, tamaño de cuerpo
+├── limits.py          ejecuciones simultáneas por operación
+├── models.py          tipos validados y modelos de respuesta
+├── scanner.py         escáner TCP (pool de workers)
+├── resolver.py        DNS asíncrono + política SSRF
+├── safe_http.py       cliente HTTP con IP fijada y redirecciones validadas
+├── auditor.py         auditoría HTTP
+├── ssl_analyzer.py    análisis TLS
+├── cve_lookup.py      cliente NVD
+├── scan_service.py    nmap, ping, crt.sh, capturas, informe Markdown
+├── pdf_generator.py   informe PDF
+├── geoip.py           GeoIP local (GeoLite2)
+├── cache.py           caché TTL-LRU
+├── config.py          riesgo por puerto
+├── logging_config.py  logs estructurados en JSON
+├── tech_signatures.json
+├── frontend/          UI (index.html, *.js, styles.css) + tests de node
+├── tests/             pytest (solo loopback o simulaciones)
+├── pyproject.toml     metadatos, dependencias, ruff/mypy/pytest
+├── requirements*.txt  ficheros de bloqueo (pip-compile, con hashes)
+├── Dockerfile, docker-compose.yml, .dockerignore
+└── .env.example
+```
 
 ---
 
-## Estructura del Proyecto
+## English summary
 
-```
-lukitaport/
-│
-├── main.py                  # App FastAPI, todos los endpoints, lifespan
-├── scanner.py               # Escáner TCP asíncrono
-├── auditor.py               # Cabeceras HTTP + detección de tecnologías + rutas
-├── ssl_analyzer.py          # Análisis de certificados SSL/TLS
-├── cve_lookup.py            # Cliente API NVD con backoff exponencial
-├── scan_service.py          # Capturas de pantalla, GeoIP, puente nmap
-├── resolver.py              # Resolución DNS + protección SSRF
-├── cache.py                 # Caché TTL-LRU de capturas de pantalla
-├── models.py                # Modelos Pydantic v2 de request/response
-├── config.py                # Mapa PORT_RISK
-├── logging_config.py        # Logs estructurados en JSON
-├── pdf_generator.py         # Renderizador PDF con WeasyPrint
-├── tech_signatures.json     # Firmas de detección de tecnologías
-│
-├── static/                  # Frontend (servido por FastAPI)
-│   ├── index.html
-│   ├── styles.css
-│   ├── state.js
-│   ├── ui.js
-│   ├── api.js
-│   ├── templates.js
-│   ├── export.js
-│   └── main.js
-│
-├── data/
-│   └── GeoLite2-City.mmdb   # Base de datos MaxMind GeoIP (no incluida)
-│
-├── .env.example
-├── requirements.txt
-├── Dockerfile
-└── docker-compose.yml
-```
+LukitaPort is an **educational** async TCP port scanner with a real-time web UI (SSE), HTTP security-header auditing, technology detection, sensitive-path checks, TLS analysis, NVD CVE lookup, IPv4 ping sweep, crt.sh subdomain enumeration, optional Chromium screenshots and JSON/CSV/HTML/Markdown/PDF export.
 
----
+**Responsible use:** only scan systems you own or are explicitly authorised in writing to test. The tool is **not anonymous**: the "stealth (slow)" mode only lowers the rate and randomises timing and port order.
 
-<p align="center">
-  <sub>LukitaPort · jaimefg1888 · For educational use only · Solo para uso educativo</sub>
-</p>
+**Quick start:** `pip install -r requirements.txt && python run.py`, then open the login URL printed on the console.
+
+**Security defaults:**
+- Listens on 127.0.0.1 only.
+- Every `/api/` route requires a token, which is mandatory off-loopback.
+- Host header allow-list, CSP and rate limiting.
+- Internal targets blocked unless `ALLOW_PRIVATE_IPS=true`.
+- DNS answers pinned; redirects and browser requests are SSRF-checked.
+
+**Configuration:** see [`.env.example`](.env.example).
+
+**Docker:** `export LUKITA_API_TOKEN=…; docker compose up --build`.
+
+**Tests:** `python -m pytest` and `node --test 'frontend/tests/*.test.mjs'`. They only ever touch 127.0.0.1 servers started by the tests, or mocks.
+
+<p align="center"><sub>LukitaPort · MIT License · For educational use only · Solo para uso educativo</sub></p>

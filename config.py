@@ -7,3 +7,11 @@ PORT_RISK: dict[int, str] = {
     80: "low", 443: "low", 465: "low", 587: "low",
     993: "low", 995: "low", 8443: "low",
 }
+
+
+def port_risk(port: object) -> str:
+    """Risk level for a port; tolerant of bad values from client payloads."""
+    try:
+        return PORT_RISK.get(int(port), "info")  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return "info"

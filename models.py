@@ -1,39 +1,31 @@
 """
 models.py
 ─────────
-Pydantic V2 request / response models for every LukitaPort endpoint.
+Pydantic v2 models and validated types for the HTTP API.
 
-• Strict validation on all inputs (Field constraints, custom validators).
-• Uniform envelope for all responses:  {ok, data, error, ts}.
-• Type aliases keep annotations terse without sacrificing clarity.
+• Input types (``TargetStr``, ``DomainStr``, ``DiscoverCidr``) carry their
+  validation, so a bad value is rejected by FastAPI with HTTP 422 in the
+  common error format before the handler runs.  These are the only copies of
+  the validation rules.
+• Response models are used as ``response_model`` so the OpenAPI schema
+  documents what each endpoint returns and FastAPI validates it.
+• ``ErrorResponse`` is the single error format:
+  ``{"ok": false, "error": "<code>", "detail": "<message>"}``.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import re
-from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 
-from pydantic import (
-    BaseModel,
-    Field,
-    RootModel,
-    field_validator,
-    model_validator,
-)
+from pydantic import AfterValidator, BaseModel, Field, RootModel, model_validator
 
 from limits import MAX_CVE_BATCH
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Re-usable type aliases
+# Validation rules
 # ──────────────────────────────────────────────────────────────────────────────
-
-Port        = Annotated[int,  Field(ge=1, le=65_535)]
-Timeout     = Annotated[float, Field(ge=0.1, le=30.0)]
-RiskLevel   = Annotated[str,  Field(pattern=r"^(high|medium|low|info)$")]
-ScanMode    = Annotated[str,  Field(pattern=r"^(quick|full|custom)$")]
-ScanProfile = Annotated[str,  Field(pattern=r"^(stealth|normal|aggressive)$")]
 
 _HOSTNAME_RE = re.compile(
     r"^(?!-)(?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)"
@@ -41,137 +33,112 @@ _HOSTNAME_RE = re.compile(
 )
 _DOMAIN_LABEL_RE = re.compile(r"^[A-Za-z0-9\-]{1,63}$")
 
+# Widest network /api/discover accepts: a /22 holds 1022 usable hosts, which
+# matches the upper bound of ``max_hosts``.  IPv6 sweeps are rejected — a /64
+# cannot be enumerated at all.
+DISCOVER_MIN_IPV4_PREFIX = 22
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Shared validators
-# ──────────────────────────────────────────────────────────────────────────────
 
-def _validate_target_str(v: str) -> str:
+def validate_target(v: str) -> str:
+    """IPv4/IPv6 literal or RFC 1123 hostname with at least one dot."""
     v = v.strip()
     if not v or len(v) > 253:
         raise ValueError("Target must be 1–253 characters.")
-    # Try IPv4 / IPv6 first
     try:
         ipaddress.ip_address(v)
         return v
     except ValueError:
         pass
-    # RFC 1123 hostname
     if _HOSTNAME_RE.match(v) and "." in v:
         return v
     raise ValueError(f"'{v}' is not a valid IPv4, IPv6, or RFC 1123 hostname.")
 
 
-def _validate_domain_str(v: str) -> str:
+def validate_domain(v: str) -> str:
     d = v.strip().lstrip("*.").lower()
     if not d or len(d) > 253 or "." not in d:
         raise ValueError("Domain must contain at least one dot (max 253 chars).")
-    labels = d.split(".")
-    if not all(_DOMAIN_LABEL_RE.match(lbl) for lbl in labels):
+    if not all(_DOMAIN_LABEL_RE.match(lbl) for lbl in d.split(".")):
         raise ValueError(f"Domain '{d}' contains invalid characters.")
     return d
 
 
-def _validate_cidr_str(v: str) -> str:
+def validate_discover_cidr(v: str) -> str:
     try:
-        ipaddress.ip_network(v.strip(), strict=False)
-        return v.strip()
+        network = ipaddress.ip_network(v.strip(), strict=False)
     except ValueError as exc:
         raise ValueError(f"Invalid CIDR: {exc}") from exc
+    if network.version != 4:
+        raise ValueError("Only IPv4 networks can be discovered.")
+    if network.prefixlen < DISCOVER_MIN_IPV4_PREFIX:
+        raise ValueError(
+            f"Network too large (/{network.prefixlen}); "
+            f"the widest allowed is /{DISCOVER_MIN_IPV4_PREFIX}."
+        )
+    return str(network)
+
+
+def parse_ports(raw: str, max_ports: int) -> list[int]:
+    """Comma-separated ports → de-duplicated list (order kept)."""
+    items = [p.strip() for p in raw.split(",")]
+    if len(items) > max_ports:
+        raise ValueError(f"Too many ports (max {max_ports}).")
+    result: list[int] = []
+    for p in items:
+        if not p.isdigit():
+            raise ValueError(f"Invalid port value: '{p}'")
+        port = int(p)
+        if not 1 <= port <= 65_535:
+            raise ValueError(f"Port {port} is out of range (1–65535).")
+        if port not in result:
+            result.append(port)
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Generic response envelope
+# Re-usable types
 # ──────────────────────────────────────────────────────────────────────────────
 
-class APIResponse(BaseModel):
-    ok:    bool                = True
-    data:  Optional[Any]       = None
-    error: Optional[str]       = None
-    ts:    datetime            = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-    @classmethod
-    def success(cls, data: Any) -> "APIResponse":
-        return cls(ok=True, data=data)
-
-    @classmethod
-    def failure(cls, message: str) -> "APIResponse":
-        return cls(ok=False, error=message)
+Port         = Annotated[int, Field(ge=1, le=65_535)]
+TargetStr    = Annotated[str, Field(max_length=300), AfterValidator(validate_target)]
+DomainStr    = Annotated[str, Field(max_length=300), AfterValidator(validate_domain)]
+DiscoverCidr = Annotated[str, Field(max_length=64), AfterValidator(validate_discover_cidr)]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# /api/resolve
+# Errors
 # ──────────────────────────────────────────────────────────────────────────────
 
-class ResolveRequest(BaseModel):
-    target: str
+class ErrorResponse(BaseModel):
+    ok:     bool = False
+    error:  str                                 # machine-readable code
+    detail: str                                 # human-readable message
+    errors: Optional[list[dict[str, Any]]] = None   # field errors (422 only)
 
-    @field_validator("target")
-    @classmethod
-    def check_target(cls, v: str) -> str:
-        return _validate_target_str(v)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# /api/resolve, /api/geoip
+# ──────────────────────────────────────────────────────────────────────────────
 
 class ResolveResponse(BaseModel):
-    input:    str
-    ip:       Optional[str]
-    hostname: Optional[str]
-    resolved: bool
-    error:    Optional[str]
+    input:     str
+    ip:        Optional[str]
+    hostname:  Optional[str]
+    ptr:       Optional[str] = None
+    resolved:  bool
+    addresses: list[str] = []
+    error:     Optional[str]
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# /api/geoip
-# ──────────────────────────────────────────────────────────────────────────────
 
 class GeoIPResponse(BaseModel):
     ip:           str
-    country:      str  = ""
-    country_code: str  = ""
-    region:       str  = ""
-    city:         str  = ""
-    isp:          str  = ""
-    asn:          str  = ""
-    org:          str  = ""
-    error:        Optional[str] = None
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# /api/scan  (SSE stream — individual events, not a final model)
-# ──────────────────────────────────────────────────────────────────────────────
-
-class ScanRequest(BaseModel):
-    target:     str
-    mode:       ScanMode    = "quick"
-    profile:    ScanProfile = "normal"
-    port_start: Port        = 1
-    port_end:   Port        = 1024
-    timeout:    Timeout     = 1.0
-
-    @field_validator("target")
-    @classmethod
-    def check_target(cls, v: str) -> str:
-        return _validate_target_str(v)
-
-    @model_validator(mode="after")
-    def port_range_order(self) -> "ScanRequest":
-        if self.mode == "custom" and self.port_start > self.port_end:
-            raise ValueError("port_start must be ≤ port_end.")
-        return self
-
-
-class PortResult(BaseModel):
-    port:            int
-    state:           str
-    service:         str
-    response_time_ms: Optional[float] = None
-    banner:          Optional[str]    = None
-    version:         Optional[str]    = None
-    risk:            Optional[str]    = None
-    # SSE progress fields
-    progress:        Optional[float]  = None
-    scanned:         Optional[int]    = None
-    total:           Optional[int]    = None
+    enabled:      bool
+    country:      Optional[str] = None
+    country_code: Optional[str] = None
+    region:       Optional[str] = None
+    city:         Optional[str] = None
+    asn:          Optional[str] = None
+    org:          Optional[str] = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -187,16 +154,6 @@ class FingerprintResponse(BaseModel):
 # ──────────────────────────────────────────────────────────────────────────────
 # /api/discover
 # ──────────────────────────────────────────────────────────────────────────────
-
-class DiscoverRequest(BaseModel):
-    cidr:      str
-    max_hosts: Annotated[int, Field(ge=1, le=1024)] = 254
-
-    @field_validator("cidr")
-    @classmethod
-    def check_cidr(cls, v: str) -> str:
-        return _validate_cidr_str(v)
-
 
 class AliveHost(BaseModel):
     ip:     str
@@ -217,10 +174,10 @@ class DiscoverResponse(BaseModel):
 
 class SubdomainEntry(BaseModel):
     subdomain:  str
-    issuer:     str           = ""
-    not_before: str           = ""
-    not_after:  str           = ""
-    ip:         Optional[str] = None
+    issuer:     str            = ""
+    not_before: str            = ""
+    not_after:  str            = ""
+    ip:         Optional[str]  = None
     resolves:   Optional[bool] = None
 
 
@@ -308,37 +265,38 @@ class AuditResponse(BaseModel):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SSLResult(BaseModel):
-    hostname:            str
-    port:                int
-    valid:               bool
-    trusted:             bool                  = False
-    verify_error:        Optional[str]         = None
-    error:               Optional[str]         = None
-    subject:             dict[str, str]        = {}
-    issuer:              dict[str, str]        = {}
-    not_before:          Optional[str]         = None
-    not_after:           Optional[str]         = None
-    days_until_expiry:   Optional[int]         = None
-    expired:             bool                  = False
-    expiring_soon:       bool                  = False
-    sans:                list[str]             = []
-    cipher:              Optional[str]         = None
-    protocol:            Optional[str]         = None
-    protocol_version:    Optional[str]         = None   # e.g. "TLSv1.3"
-    bits:                Optional[int]         = None
-    weak_cipher:         bool                  = False
-    deprecated_protocol: bool                  = False
-    self_signed:         bool                  = False
-    grade:               str                   = "F"
-    issues:              list[str]             = []
-    tls_versions_offered: list[str]            = []
-    tls_versions_untested: list[str]           = []
+    hostname:              str
+    port:                  int
+    valid:                 bool
+    trusted:               bool                  = False
+    verify_error:          Optional[str]         = None
+    error:                 Optional[str]         = None
+    subject:               dict[str, str]        = {}
+    issuer:                dict[str, str]        = {}
+    not_before:            Optional[str]         = None
+    not_after:             Optional[str]         = None
+    days_until_expiry:     Optional[int]         = None
+    expired:               bool                  = False
+    expiring_soon:         bool                  = False
+    sans:                  list[str]             = []
+    cipher:                Optional[str]         = None
+    protocol:              Optional[str]         = None
+    protocol_version:      Optional[str]         = None   # e.g. "TLSv1.3"
+    bits:                  Optional[int]         = None
+    weak_cipher:           bool                  = False
+    deprecated_protocol:   bool                  = False
+    self_signed:           bool                  = False
+    grade:                 str                   = "F"
+    issues:                list[str]             = []
+    tls_versions_offered:  list[str]             = []
+    tls_versions_untested: list[str]             = []
 
 
 class SSLResponse(BaseModel):
     target:  str
     ip:      str
     results: dict[str, SSLResult]
+    error:   Optional[str] = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -362,6 +320,7 @@ class CVELookupResponse(BaseModel):
     cves:         list[CVEEntry]
     error:        Optional[str] = None
     cached:       bool          = False
+    skipped:      bool          = False
 
 
 class CVEServiceInfo(BaseModel):
@@ -372,13 +331,17 @@ class CVEServiceInfo(BaseModel):
 
 
 class CVEBatchRequest(RootModel[dict[Port, CVEServiceInfo]]):
-    """``{"<port>": {"name": ..., "version": ...}, ...}`` — bounded size."""
+    """``{"<port>": {"name", "product", "version", "cpe"}, ...}`` — bounded size."""
 
     @model_validator(mode="after")
-    def cap_size(self) -> "CVEBatchRequest":
+    def cap_size(self) -> CVEBatchRequest:
         if len(self.root) > MAX_CVE_BATCH:
             raise ValueError(f"At most {MAX_CVE_BATCH} ports per CVE batch.")
         return self
+
+
+class CVEBatchResponse(BaseModel):
+    results: dict[int, CVELookupResponse]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -387,6 +350,10 @@ class CVEBatchRequest(RootModel[dict[Port, CVEServiceInfo]]):
 
 class AuthRequest(BaseModel):
     token: str = Field(..., min_length=1, max_length=512)
+
+
+class AuthStatus(BaseModel):
+    authenticated: bool
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -409,17 +376,15 @@ class ExportRequest(BaseModel):
 # /api/screenshot
 # ──────────────────────────────────────────────────────────────────────────────
 
-class ScreenshotCaptureRequest(BaseModel):
-    target: str
-    port:   Port = 80
-
-    @field_validator("target")
-    @classmethod
-    def check_target(cls, v: str) -> str:
-        return _validate_target_str(v)
-
-
 class ScreenshotCaptureResponse(BaseModel):
     status: str
     target: str
     port:   int
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /api/health
+# ──────────────────────────────────────────────────────────────────────────────
+
+class HealthResponse(BaseModel):
+    ok: bool = True

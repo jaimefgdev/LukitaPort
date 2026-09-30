@@ -16,6 +16,7 @@ Usage
 import json
 import logging
 import time
+from collections.abc import MutableMapping
 from typing import Any
 
 
@@ -30,7 +31,7 @@ class _JSONFormatter(logging.Formatter):
          "taskName", "asctime")
     )
 
-    def format(self, record: logging.LogRecord) -> str:  # noqa: A003
+    def format(self, record: logging.LogRecord) -> str:
         record.message = record.getMessage()
         payload: dict[str, Any] = {
             "ts":      time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
@@ -59,10 +60,7 @@ def configure_logging(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    if not root.handlers:
-        handler = logging.StreamHandler()
-    else:
-        handler = root.handlers[0]
+    handler: logging.Handler = root.handlers[0] if root.handlers else logging.StreamHandler()
 
     handler.setFormatter(_JSONFormatter())
     if handler not in root.handlers:
@@ -93,7 +91,9 @@ class StructuredLogger(logging.LoggerAdapter):
 
     _PASSTHROUGH = frozenset(("exc_info", "stack_info", "stacklevel", "extra"))
 
-    def process(self, msg: Any, kwargs: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    def process(
+        self, msg: Any, kwargs: MutableMapping[str, Any],
+    ) -> tuple[Any, MutableMapping[str, Any]]:
         fields = {k: kwargs.pop(k) for k in list(kwargs) if k not in self._PASSTHROUGH}
         extra  = dict(kwargs.get("extra") or {})
         for key, val in fields.items():

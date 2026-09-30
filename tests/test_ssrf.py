@@ -70,7 +70,8 @@ def test_audit_uses_pinned_ip(app_client, monkeypatch, allow_private):
 
     async def fake_audit(target, ports, pinned_ip=None):
         calls.append((target, pinned_ip))
-        return {"headers": {}, "technologies": {}, "paths": {}}
+        return {"headers": {"url": "http://x"}, "technologies": {"url": "http://x"},
+                "paths": {"base_url": "http://x"}}
 
     monkeypatch.setattr(main, "run_full_audit", fake_audit)
     resp = app_client.get("/api/audit", params={"target": "127.0.0.1", "open_ports": "80"})
