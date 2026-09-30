@@ -87,7 +87,7 @@
                     <label><span class="es">Perfil</span><span class="en">Profile</span></label>
                     <select id="scan-profile">
                         <option value="normal"     data-es="Normal"     data-en="Normal">Normal</option>
-                        <option value="stealth"    data-es="Stealth"    data-en="Stealth">Stealth</option>
+                        <option value="stealth"    data-es="Discreto"   data-en="Stealth">Discreto</option>
                         <option value="aggressive" data-es="Agresivo"   data-en="Aggressive">Agresivo</option>
                     </select>
                 </div>
@@ -112,19 +112,23 @@
                 </div>
             </div>
 
-            <!-- Anon mode compact -->
+            <!-- Modo sigiloso (lento) — antes "modo anónimo" -->
             <div class="anon-row">
-                <label class="anon-toggle" for="anon-mode" style="display:flex;align-items:center;gap:9px;cursor:pointer;flex:1">
-                    <div id="anon-dot" style="width:9px;height:9px;border-radius:50%;background:#333;box-shadow:none;transition:all .3s;flex-shrink:0"></div>
+                <label class="anon-toggle" for="slow-mode" style="display:flex;align-items:center;gap:9px;cursor:pointer;flex:1">
+                    <div id="slow-dot" style="width:9px;height:9px;border-radius:50%;background:#333;box-shadow:none;transition:all .3s;flex-shrink:0"></div>
                     <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.5px;color:#555">
-                        🕵️ <span class="es">MODO ANÓNIMO</span><span class="en">ANONYMOUS MODE</span>
+                        🐢 <span class="es">MODO SIGILOSO (LENTO)</span><span class="en">STEALTH (SLOW) MODE</span>
                     </span>
-                    <input type="checkbox" id="anon-mode" style="display:none"/>
-                    <span id="anon-status" style="font-family:var(--font-mono);font-size:10px;color:#333;margin-left:auto">
-                        <span class="es">Stealth + delays aleatorios</span>
-                        <span class="en">Stealth + random delays</span>
+                    <input type="checkbox" id="slow-mode" style="display:none"/>
+                    <span id="slow-status" style="font-family:var(--font-mono);font-size:10px;color:#333;margin-left:auto">
+                        <span class="es">Desactivado</span>
+                        <span class="en">Off</span>
                     </span>
                 </label>
+            </div>
+            <div class="slow-note" id="slow-note" hidden>
+                <span class="es">3 sondas en paralelo, retardos aleatorios de 0,5–3 s y puertos en orden aleatorio. <strong>No anonimiza</strong>: el objetivo sigue viendo tu IP.</span>
+                <span class="en">3 parallel probes, random 0.5–3 s delays and random port order. <strong>Not anonymous</strong>: the target still sees your IP.</span>
             </div>
 
             <button class="btn-scan" id="btn-scan">

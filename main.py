@@ -54,7 +54,7 @@ import asyncio
 import itertools
 import json
 import os
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from typing import Annotated, AsyncGenerator, Optional
 
 from fastapi import BackgroundTasks, FastAPI, Query, Request
@@ -69,7 +69,7 @@ from models import AuthRequest, CVEBatchRequest, ExportRequest, ScreenshotCaptur
 from cache import screenshot_cache
 from config import PORT_RISK
 from resolver import resolve_target, is_ssrf_blocked, network_ssrf_blocked
-from scanner import scan_ports_stream, get_port_range, PROFILES
+from scanner import scan_ports_stream, get_port_range, PROFILES, ScanResourceError
 from auditor import run_full_audit
 from ssl_analyzer import analyze_ssl_for_ports
 from cve_lookup import lookup_cves, lookup_cves_for_ports, get_cache_stats
@@ -88,6 +88,9 @@ from scan_service import (
 
 import ipaddress
 import re as _re
+
+# Seconds between client-disconnect checks while streaming scan results.
+DISCONNECT_CHECK_INTERVAL = 0.5
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Lifespan  (startup + shutdown)
@@ -397,7 +400,7 @@ async def resolve(target: str = Query(...)) -> Response:
     safe, err = _validate_target(target)
     if err:
         return err
-    resolution = resolve_target(safe)
+    resolution = await resolve_target(safe, reverse_dns=True)
     # Expose ssrf_blocked as a 403 at this endpoint too, so the frontend
     # can surface a clear error message before the user even starts a scan.
     resolution_err = _check_resolution(resolution)
@@ -415,7 +418,7 @@ async def geoip(target: str = Query(...)) -> Response:
     safe, err = _validate_target(target)
     if err:
         return err
-    resolution = resolve_target(safe)
+    resolution = await resolve_target(safe)
     resolution_err = _check_resolution(resolution)
     if resolution_err:
         return resolution_err
@@ -434,45 +437,42 @@ async def scan(
     request:    Request,
     target:     str   = Query(...),
     mode:       str   = Query("quick",  pattern=r"^(quick|full|custom)$"),
-    profile:    str   = Query("normal", pattern=r"^(stealth|normal|aggressive)$"),
+    profile:    str   = Query("normal", pattern=r"^(stealth|normal|aggressive|slow)$"),
     port_start: int   = Query(1,    ge=1, le=65_535),
     port_end:   int   = Query(1024, ge=1, le=65_535),
     timeout:    float = Query(1.0,  ge=0.1, le=5.0),
 ) -> StreamingResponse:
 
-    async def _error_stream(msg: str, status: int = 400) -> AsyncGenerator[str, None]:
-        yield f"data: {json.dumps({'error': msg, 'status': status})}\n\n"
+    def _error_response(msg: str, status: int = 400) -> StreamingResponse:
+        async def stream() -> AsyncGenerator[str, None]:
+            yield f"data: {json.dumps({'error': msg, 'status': status})}\n\n"
+        return StreamingResponse(stream(), media_type="text/event-stream")
 
     safe, err = _validate_target(target)
     if err:
-        return StreamingResponse(
-            _error_stream("Invalid target."),
-            media_type="text/event-stream",
+        return _error_response("Invalid target.")
+    if mode == "custom" and port_start > port_end:
+        return _error_response(
+            f"Invalid custom range: start port ({port_start}) is greater than end port ({port_end})."
         )
 
-    resolution = resolve_target(safe)
+    resolution = await resolve_target(safe, reverse_dns=True)
 
     # SSRF check — propagate as an SSE error event so the frontend
     # receives a structured message even over the event stream.
     if not resolution["ip"]:
-        return StreamingResponse(
-            _error_stream(f"Could not resolve target: {resolution['error']}"),
-            media_type="text/event-stream",
-        )
+        return _error_response(f"Could not resolve target: {resolution['error']}")
     if resolution["error"] == "ssrf_blocked" or is_ssrf_blocked(resolution["ip"]):
-        return StreamingResponse(
-            _error_stream(
-                f"Scanning internal addresses is not permitted "
-                f"(resolved: {resolution['ip']}). "
-                "Set ALLOW_PRIVATE_IPS=true to scan private networks.",
-                status=403,
-            ),
-            media_type="text/event-stream",
+        return _error_response(
+            f"Scanning internal addresses is not permitted "
+            f"(resolved: {resolution['ip']}). "
+            "Set ALLOW_PRIVATE_IPS=true to scan private networks.",
+            status=403,
         )
 
     ip    = resolution["ip"]
     ports = get_port_range(mode, port_start, port_end)
-    prof  = PROFILES.get(profile, PROFILES["normal"])
+    prof  = PROFILES[profile]
 
     logger.info(
         "scan_start",
@@ -490,23 +490,23 @@ async def scan(
             yield f"data: {json.dumps({'error': str(limits.Busy('scan')), 'status': 429})}\n\n"
             return
         try:
-            async for chunk in _scan_events():
-                yield chunk
+            async with aclosing(_scan_events()) as events:
+                async for chunk in events:
+                    yield chunk
         finally:
             limits.scans.release()
 
     async def _scan_events() -> AsyncGenerator[str, None]:
         try:
-            geo = await asyncio.wait_for(
-                asyncio.create_task(fetch_geoip(ip)), timeout=3.0
-            )
-        except Exception:
+            geo = await asyncio.wait_for(fetch_geoip(ip), timeout=3.0)
+        except Exception:  # noqa: BLE001
             geo = {}
 
         meta = {
             "type":        "meta",
             "ip":          ip,
             "hostname":    resolution["hostname"],
+            "ptr":         resolution.get("ptr"),
             "resolved":    resolution["resolved"],
             "total_ports": len(ports),
             "mode":        mode,
@@ -517,20 +517,36 @@ async def scan(
         yield f"data: {json.dumps(meta)}\n\n"
 
         open_count = 0
-        async for result in scan_ports_stream(
+        loop = asyncio.get_running_loop()
+        next_disconnect_check = loop.time() + DISCONNECT_CHECK_INTERVAL
+        # aclosing: whatever ends this loop (disconnect, error, cancellation)
+        # closes the scanner generator, which cancels its worker tasks.
+        async with aclosing(scan_ports_stream(
             ip, ports, timeout,
             max_concurrent=prof["max_concurrent"],
             inter_delay=prof["inter_delay"],
-        ):
-            if await request.is_disconnected():
-                logger.info("scan_cancelled", ip=ip)
-                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
-                return
+            jitter=prof["jitter"],
+            shuffle=prof["shuffle"],
+        )) as results:
+            try:
+                async for result in results:
+                    # Polling is_disconnected() per port is costly on full
+                    # scans; once per interval is enough.
+                    if loop.time() >= next_disconnect_check:
+                        next_disconnect_check = loop.time() + DISCONNECT_CHECK_INTERVAL
+                        if await request.is_disconnected():
+                            logger.info("scan_cancelled", ip=ip)
+                            yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
+                            return
 
-            if result["state"] == "open":
-                open_count += 1
-            result["type"] = "port"
-            yield f"data: {json.dumps(result)}\n\n"
+                    if result["state"] == "open":
+                        open_count += 1
+                    result["type"] = "port"
+                    yield f"data: {json.dumps(result)}\n\n"
+            except ScanResourceError as exc:
+                logger.error("scan_resource_error", ip=ip, error=str(exc))
+                yield f"data: {json.dumps({'error': str(exc), 'status': 503})}\n\n"
+                return
 
         logger.info("scan_done", ip=ip, open=open_count, total=len(ports))
         yield (
@@ -598,7 +614,7 @@ async def fingerprint(
     if err2:
         return err2
 
-    resolution = resolve_target(safe)
+    resolution = await resolve_target(safe)
     resolution_err = _check_resolution(resolution)
     if resolution_err:
         return resolution_err
@@ -641,7 +657,7 @@ async def capture_screenshot(
     if err:
         return err
 
-    resolution = resolve_target(safe)
+    resolution = await resolve_target(safe)
     resolution_err = _check_resolution(resolution)
     if resolution_err:
         return resolution_err
@@ -676,7 +692,7 @@ async def audit(
     if err2:
         return err2
 
-    resolution = resolve_target(safe)
+    resolution = await resolve_target(safe)
     resolution_err = _check_resolution(resolution)
     if resolution_err:
         return resolution_err
@@ -704,7 +720,7 @@ async def ssl_analysis(
     if err2:
         return err2
 
-    resolution = resolve_target(safe)
+    resolution = await resolve_target(safe)
     resolution_err = _check_resolution(resolution)
     if resolution_err:
         return resolution_err
@@ -727,8 +743,9 @@ async def cve_lookup_endpoint(
     service:     str = Query(..., min_length=1, max_length=100),
     version:     str = Query("", max_length=100),
     max_results: int = Query(5, ge=1, le=10),
+    cpe:         str = Query("", max_length=200),
 ) -> Response:
-    result = await lookup_cves(service, version, max_results)
+    result = await lookup_cves(service, version, max_results, cpe=cpe or None)
     return _json_response(result)
 
 
@@ -778,7 +795,7 @@ async def export_pdf(payload: ExportRequest) -> Response:
             if sc:
                 screenshot_png = sc.get("png")
 
-        loop      = asyncio.get_event_loop()
+        loop      = asyncio.get_running_loop()
         pdf_bytes = await loop.run_in_executor(
             None,
             generate_pdf,

@@ -336,6 +336,10 @@ export function tmplSSLAudit(data, lang) {
             }).join('');
             html += `<div style="margin-bottom:12px"><div style="font-family:var(--font-mono);font-size:9px;color:#555;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px">${lang === 'es' ? 'Versiones TLS aceptadas' : 'TLS versions offered'}</div><div style="display:flex;flex-wrap:wrap;gap:5px">${verTags}</div></div>`;
         }
+        if (ssl.tls_versions_untested?.length) {
+            const list = escapeHTML(ssl.tls_versions_untested.join(', '));
+            html += `<div style="margin-bottom:12px;font-family:var(--font-mono);font-size:10px;color:#666">${lang === 'es' ? 'No comprobables con el OpenSSL local' : 'Not testable with the local OpenSSL'}: ${list}</div>`;
+        }
 
         if (ssl.sans?.length) {
             const sanTags = ssl.sans.slice(0, 8).map(s => `<span style="font-family:var(--font-mono);font-size:11px;color:#8899ff;background:rgba(100,100,255,.08);border:1px solid rgba(100,100,255,.15);padding:2px 8px;border-radius:3px">${escapeHTML(s)}</span>`).join('');

@@ -332,6 +332,7 @@ class SSLResult(BaseModel):
     grade:               str                   = "F"
     issues:              list[str]             = []
     tls_versions_offered: list[str]            = []
+    tls_versions_untested: list[str]           = []
 
 
 class SSLResponse(BaseModel):
@@ -367,6 +368,7 @@ class CVEServiceInfo(BaseModel):
     name:    str = Field("", max_length=100)
     product: str = Field("", max_length=100)
     version: str = Field("", max_length=100)
+    cpe:     str = Field("", max_length=200)
 
 
 class CVEBatchRequest(RootModel[dict[Port, CVEServiceInfo]]):

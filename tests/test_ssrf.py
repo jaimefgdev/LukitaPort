@@ -36,16 +36,16 @@ def test_allow_private_ips_disables_policy(allow_private):
     assert not resolver.is_ssrf_blocked("127.0.0.1")
 
 
-def test_hostname_with_any_internal_record_is_blocked(monkeypatch):
+async def test_hostname_with_any_internal_record_is_blocked(monkeypatch):
     monkeypatch.setattr(resolver, "lookup_addresses", lambda h: ["8.8.8.8", "10.0.0.5"])
-    res = resolver.resolve_target("mixed.test")
+    res = await resolver.resolve_target("mixed.test")
     assert res["error"] == "ssrf_blocked"
     assert res["ip"] == "10.0.0.5"
 
 
-def test_hostname_pins_first_address(monkeypatch):
+async def test_hostname_pins_first_address(monkeypatch):
     monkeypatch.setattr(resolver, "lookup_addresses", lambda h: ["8.8.8.8", "1.1.1.1"])
-    res = resolver.resolve_target("ok.test")
+    res = await resolver.resolve_target("ok.test")
     assert res["error"] is None and res["ip"] == "8.8.8.8"
     assert res["addresses"] == ["8.8.8.8", "1.1.1.1"]
 
@@ -211,3 +211,50 @@ def test_screenshot_url():
     assert scan_service.screenshot_url("a.test", 80) == "http://a.test"
     assert scan_service.screenshot_url("a.test", 8443) == "https://a.test:8443"
     assert scan_service.screenshot_url("2001:db8::1", 443) == "https://[2001:db8::1]"
+
+
+async def test_ip_literal_skips_reverse_dns_by_default(monkeypatch):
+    import socket
+
+    def boom(ip):
+        raise AssertionError("reverse DNS must not run")
+
+    monkeypatch.setattr(socket, "gethostbyaddr", boom)
+    res = await resolver.resolve_target("8.8.8.8")
+    assert res["hostname"] is None and res["ptr"] is None and res["error"] is None
+
+
+async def test_reverse_dns_is_bounded_by_timeout(monkeypatch):
+    import socket
+    import time
+
+    def slow(ip):
+        time.sleep(0.5)
+        return ("slow.test", [], [ip])
+
+    monkeypatch.setattr(socket, "gethostbyaddr", slow)
+    assert await resolver.reverse_lookup("127.0.0.1", timeout=0.05) is None
+    assert await resolver.reverse_lookup("127.0.0.1", timeout=2) == "slow.test"
+
+
+async def test_dns_does_not_block_event_loop(monkeypatch):
+    import asyncio
+    import time
+
+    def slow_lookup(host):
+        time.sleep(0.3)
+        return ["8.8.8.8"]
+
+    monkeypatch.setattr(resolver, "lookup_addresses", slow_lookup)
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    t = asyncio.create_task(ticker())
+    await resolver.resolve_target("slow.test")
+    t.cancel()
+    assert ticks >= 10          # the loop kept running during the lookup

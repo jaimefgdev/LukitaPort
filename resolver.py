@@ -50,6 +50,7 @@ import asyncio
 import ipaddress
 import os
 import socket
+from typing import Optional
 
 from logging_config import get_logger
 
@@ -141,20 +142,40 @@ def is_valid_ip_any(target: str) -> bool:
 # Public resolution function
 # ──────────────────────────────────────────────────────────────────────────────
 
-def resolve_target(target: str) -> dict:
+REVERSE_DNS_TIMEOUT = 1.0
+
+
+async def reverse_lookup(ip: str, timeout: float = REVERSE_DNS_TIMEOUT) -> Optional[str]:
+    """PTR name for ``ip`` (display only), or None on failure/timeout."""
+    loop = asyncio.get_running_loop()
+    try:
+        name, _, _ = await asyncio.wait_for(
+            loop.run_in_executor(None, socket.gethostbyaddr, ip), timeout,
+        )
+        return name
+    except (OSError, asyncio.TimeoutError):
+        return None
+
+
+async def resolve_target(target: str, reverse_dns: bool = False) -> dict:
     """
     Resolve ``target`` (IP or hostname) to a canonical IP address, then
-    perform an SSRF check on the result.
+    perform an SSRF check on the result.  Never blocks the event loop.
 
     Returns
     -------
     dict with keys:
         input     : str            – original input string.
-        ip        : str | None     – resolved IPv4/IPv6 string, or None.
-        hostname  : str | None     – reverse-DNS result or original hostname.
+        ip        : str | None     – pinned IPv4/IPv6 address, or None.
+        hostname  : str | None     – the hostname for hostname targets,
+                                     None for IP literals.
+        ptr       : str | None     – reverse-DNS name, only when
+                                     ``reverse_dns`` is True (display only;
+                                     never used to connect).
         resolved  : bool           – True when a DNS lookup was performed.
+        addresses : list[str]      – every address the name resolved to.
         error     : str | None     – None on success.
-                                     ``"ssrf_blocked"`` when the resolved IP is
+                                     ``"ssrf_blocked"`` when a resolved IP is
                                      non-routable and ALLOW_PRIVATE_IPS is false.
                                      DNS error message string on resolution failure.
 
@@ -166,45 +187,35 @@ def resolve_target(target: str) -> dict:
 
     # ── Branch A: direct IP literal ──────────────────────────────────────────
     if is_valid_ip_any(target):
-        hostname: str | None = None
-        try:
-            hostname = socket.gethostbyaddr(target)[0]
-        except OSError:                      # herror / gaierror / timeout
-            pass
-
-        if is_ssrf_blocked(target):
+        ptr = await reverse_lookup(target) if reverse_dns else None
+        blocked = is_ssrf_blocked(target)
+        if blocked:
             logger.warning(
                 "ssrf_blocked",
                 input=target,
                 ip=target,
                 allow_private=_allow_private_ips(),
             )
-            return {
-                "input":    target,
-                "ip":       target,
-                "hostname": hostname,
-                "resolved": False,
-                "error":    "ssrf_blocked",
-                "addresses": [target],
-            }
-
         return {
-            "input":    target,
-            "ip":       target,
-            "hostname": hostname,
-            "resolved": False,
-            "error":    None,
+            "input":     target,
+            "ip":        target,
+            "hostname":  None,
+            "ptr":       ptr,
+            "resolved":  False,
+            "error":     "ssrf_blocked" if blocked else None,
             "addresses": [target],
         }
 
     # ── Branch B: hostname → DNS ──────────────────────────────────────────────
+    loop = asyncio.get_running_loop()
     try:
-        addresses = lookup_addresses(target)
+        addresses = await loop.run_in_executor(None, lookup_addresses, target)
     except socket.gaierror as exc:
         return {
             "input":     target,
             "ip":        None,
             "hostname":  None,
+            "ptr":       None,
             "resolved":  False,
             "error":     str(exc),
             "addresses": [],
@@ -214,6 +225,7 @@ def resolve_target(target: str) -> dict:
             "input":     target,
             "ip":        None,
             "hostname":  None,
+            "ptr":       None,
             "resolved":  False,
             "error":     "no addresses found",
             "addresses": [],
@@ -223,7 +235,6 @@ def resolve_target(target: str) -> dict:
     # internal record could otherwise reach the internal one later.  The
     # first address is *pinned* — callers must connect to ``ip`` (sending
     # the hostname only as Host/SNI) so DNS is never consulted again.
-    ip      = addresses[0]
     blocked = [a for a in addresses if is_ssrf_blocked(a)]
     if blocked:
         logger.warning(
@@ -232,21 +243,13 @@ def resolve_target(target: str) -> dict:
             ip=blocked[0],
             allow_private=_allow_private_ips(),
         )
-        return {
-            "input":     target,
-            "ip":        blocked[0],
-            "hostname":  target,
-            "resolved":  True,
-            "error":     "ssrf_blocked",
-            "addresses": addresses,
-        }
-
     return {
         "input":     target,
-        "ip":        ip,
+        "ip":        blocked[0] if blocked else addresses[0],
         "hostname":  target,
+        "ptr":       None,
         "resolved":  True,
-        "error":     None,
+        "error":     "ssrf_blocked" if blocked else None,
         "addresses": addresses,
     }
 
